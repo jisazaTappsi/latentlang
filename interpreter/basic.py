@@ -2,12 +2,12 @@
 # IMPORTS
 ########################
 import re
-import data
 import torch
 import string
 
-from util import device, BLOCK_SIZE, MODEL_NAME
-from train_module import CrossAttentionTransformer
+from . import data
+from .util import device, BLOCK_SIZE, MODEL_NAME
+from .train_module import CrossAttentionTransformer
 
 ########################
 # CONSTANTS
@@ -125,7 +125,7 @@ class Position:
 ########################
 # TOKENS
 ########################
-from tokens import *
+from .tokens import *
 
 
 class Token:

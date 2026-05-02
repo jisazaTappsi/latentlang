@@ -2,8 +2,8 @@ import os
 import json
 import pandas as pd
 
-from util import *
-from tokens import *
+from .util import *
+from .tokens import *
 
 lex_vocab_size = 255 + len(TOKENS)  # Source (Lexer) vocabulary size
 ast_vocab_size = 255 + len(TOKENS)  # Target (AST) vocabulary size

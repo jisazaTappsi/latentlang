@@ -2,9 +2,9 @@ import math
 import torch.nn as nn
 from torch.nn import functional as F
 
-import data
-from util import *
-from tokens import *
+from . import data
+from .util import *
+from .tokens import *
 
 torch.manual_seed(42)
 

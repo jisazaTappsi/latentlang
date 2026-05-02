@@ -74,20 +74,20 @@ The AI interpreter is a **Cross-Attention Transformer** (encoder-decoder) traine
 
 ### Key components
 
-| File                    | Role |
-|-------------------------|---|
-| `interpreter/tokens.py` | Token types, keyword list, and byte-ID reservations. |
-| `interpreter/basic.py`              | Lexer, parser, AST nodes, interpreter, symbol table, error types, `run_ai()` entry point. |
-| `interpreter/grammar.txt`           | Formal grammar the AST targets. |
-| `interpreter/data.py`               | Byte-pair-encoding (BPE) merges over the custom token space; batching into tensors. |
-| `interpreter/data_generator.py`     | Synthesizes `(lex_text, ast_text)` pairs using `FUNC_TEMPLATES` — the dictionary of methods the AI learns. |
-| `interpreter/train_module.py`       | `CrossAttentionTransformer` definition and training loop. |
-| `interpreter/train_pipeline.py`     | End-to-end: generate data → train → evaluate. |
-| `interpreter/samples.py`            | Scores the trained model: per-sample AST match and symbol-table (computation) match. |
-| `interpreter/shell.py`              | Interactive REPL for local use. |
-| `interpreter/tests.py`              | Lexer/parser/interpreter tests plus multi-style arithmetic tests. |
-| `frontend/`             | Nuxt 3 + Vue 3 REPL served statically to S3 + CloudFront. |
-| `backend.py`            | FastAPI service exposing `POST /interpret`. |
+| File                            | Role |
+|---------------------------------|---|
+| `interpreter/tokens.py`         | Token types, keyword list, and byte-ID reservations. |
+| `interpreter/basic.py`          | Lexer, parser, AST nodes, interpreter, symbol table, error types, `run_ai()` entry point. |
+| `interpreter/grammar.txt`       | Formal grammar the AST targets. |
+| `interpreter/data.py`           | Byte-pair-encoding (BPE) merges over the custom token space; batching into tensors. |
+| `interpreter/data_generator.py` | Synthesizes `(lex_text, ast_text)` pairs using `FUNC_TEMPLATES` — the dictionary of methods the AI learns. |
+| `interpreter/train_module.py`   | `CrossAttentionTransformer` definition and training loop. |
+| `interpreter/train_pipeline.py` | End-to-end: generate data → train → evaluate. |
+| `interpreter/samples.py`        | Scores the trained model: per-sample AST match and symbol-table (computation) match. |
+| `interpreter/shell.py`          | Interactive REPL for local use. |
+| `interpreter/tests.py`          | Lexer/parser/interpreter tests plus multi-style arithmetic tests. |
+| `frontend/`                     | Nuxt 3 + Vue 3 REPL served statically to S3 + CloudFront. |
+| `backend/`                      | FastAPI service exposing `POST /interpret`. |
 
 ---
 
@@ -158,8 +158,7 @@ Requires PyTorch (CUDA, MPS, or CPU — auto-detected in `util.py`), FastAPI, an
 ### 2. Train
 
 ```bash
-cd interpreter
-python train_pipeline.py
+python -m interpreter.train_pipeline
 ```
 
 This will:
@@ -176,8 +175,7 @@ Re-running loads the existing checkpoint and fine-tunes further.
 ### 3. Run the REPL
 
 ```bash
-cd interpreter
-python shell.py
+python -m interpreter.shell
 ```
 
 ```
@@ -196,7 +194,7 @@ basic > x times x
 Backend:
 
 ```bash
-uvicorn backend:app --port 9000 --reload
+uvicorn backend.backend:app --port 9000 --reload
 ```
 
 Frontend:
@@ -233,14 +231,44 @@ A rough throughput number for comparing training configurations.
 
 ## Deployment
 
-Frontend → S3 + CloudFront (static site):
+### Frontend → S3 + CloudFront (static site)
 
 ```bash
 cd frontend
-python scripts/deploy_s3.py --bucket YOUR_BUCKET --distribution YOUR_DIST_ID
+python scripts/deploy.py --bucket YOUR_BUCKET --distribution YOUR_DIST_ID
 ```
 
-Backend → any WSGI/ASGI host (FastAPI). Set `CORS_ORIGINS` to a comma-separated list of allowed origins and point `NUXT_PUBLIC_API_BASE` at it when building the frontend.
+Point `NUXT_PUBLIC_API_BASE` at the backend URL when building.
+
+### Backend → uvicorn behind Caddy
+
+The backend is a FastAPI app served by `uvicorn` and fronted by [Caddy](https://caddyserver.com/) as a reverse proxy (Caddy handles TLS automatically in production).
+
+Set `CORS_ORIGINS` to a comma-separated list of allowed origins (e.g. the CloudFront domain and `https://www.latentlang.com`).
+
+**Run uvicorn** (bind to localhost; Caddy handles the public port):
+
+```bash
+CORS_ORIGINS="https://www.latentlang.com" \
+uvicorn backend.backend:app --host 127.0.0.1 --port 9000
+```
+
+For production, run uvicorn under a process manager (`systemd`, `supervisord`, `pm2`, …) so it restarts on failure and at boot.
+
+**Run Caddy** — two configs are provided:
+
+- `backend/Caddyfile` — production. Serves `api.latentlang.com` and reverse-proxies to `127.0.0.1:9000`. Caddy provisions a Let's Encrypt cert automatically (ports 80/443 must be reachable and DNS for `api.latentlang.com` must point at the host).
+- `backend/Caddyfiledev` — local. Listens on `:8080` with no TLS, useful for testing the proxy path before deploying.
+
+```bash
+# production
+sudo caddy run --config backend/Caddyfile
+
+# local dev
+caddy run --config backend/Caddyfiledev
+```
+
+In production, run Caddy via its bundled systemd unit (`systemctl enable --now caddy`) pointed at `backend/Caddyfile` so it survives reboots.
 
 ---
 
@@ -258,7 +286,7 @@ Covers the lexer, parser, classical interpreter, function defs, and the multi-st
 
 1. **Add a method**: append to `FUNC_TEMPLATES` in `data_generator.py` with a short arithmetic body.
 2. **Add a syntactic style**: extend the surface-form generator in `data_generator.py` so the pair `(new_style, canonical_ast)` shows up in training.
-3. **Retrain**: `python train_pipeline.py`.
+3. **Retrain**: `python -m interpreter.train_pipeline`.
 4. **Use it**: the REPL will now understand the new form.
 
 No changes to the interpreter are needed: The grammar stays fixed; the model builds higher order methods.

@@ -1,9 +1,9 @@
-import data
 import statistics
 import pandas as pd
 
-from util import *
-from code_train import CrossAttentionTransformer
+from . import data
+from .util import *
+from .train_module import CrossAttentionTransformer
 
 data_to_params_ratio = 20
 max_samples_count_params = 1_000

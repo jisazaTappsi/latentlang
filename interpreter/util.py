@@ -14,8 +14,8 @@ DROPOUT = 0.2
 N_HEAD = 3  # 4
 N_EMBED = 64 * N_HEAD  # 32
 TRAIN_SPLIT_RATIO = 0.8
-MODEL_NAME = 'model.pth'
-DATASET_NAME = 'dataset.pkl'
+MODEL_NAME = 'backend/model.pth'
+DATASET_NAME = 'interpreter/dataset.pkl'
 
 
 if torch.cuda.is_available():

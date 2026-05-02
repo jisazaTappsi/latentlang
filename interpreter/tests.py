@@ -1,6 +1,6 @@
-import basic
-import tokens
-from basic import EOF
+from . import basic
+from . import tokens
+from .basic import EOF
 
 
 def test_lexing_float_plus_int():
@@ -210,7 +210,7 @@ def test_function_def_and_calls():
 
 def test_learned_infix_operators():
     """Infix template ops (e.g. 8 times 8); meaning from data_generator templates + symbol table only."""
-    import data_generator as dg
+    from . import data_generator as dg
 
     text = '7+8 times 8'
     lexer = basic.Lexer('<stdin>', text)

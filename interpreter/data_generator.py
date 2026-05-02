@@ -6,10 +6,10 @@ import pandas as pd
 from typing import Optional
 
 
-import data
-import basic
-import tokens
-from util import *
+from . import data
+from . import basic
+from . import tokens
+from .util import *
 
 
 def log_scale_int(low: int, high: int, base: float = math.e) -> int:

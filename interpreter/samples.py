@@ -1,12 +1,12 @@
 import statistics
 import pandas as pd
 
-import data
-import basic
-from util import *
-from basic import Parser
-from data_generator import print_program
-from train_module import CrossAttentionTransformer
+from . import data
+from . import basic
+from .util import *
+from .basic import Parser
+from .data_generator import print_program
+from .train_module import CrossAttentionTransformer
 
 # Set random seed for reproducibility
 torch.manual_seed(42)

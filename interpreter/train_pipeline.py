@@ -1,7 +1,8 @@
 import time
-import samples
-import train_module
-import data_generator
+
+from . import samples
+from . import train_module
+from . import data_generator
 
 
 data_generator.generate()
