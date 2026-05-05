@@ -1,6 +1,6 @@
 import torch
 
-PRODUCTION_RUN = False
+PRODUCTION_RUN = True
 NUM_TRAINING_SAMPLES = 1_000_000 if PRODUCTION_RUN else 100_000
 BATCH_SIZE = 64  # 32
 BLOCK_SIZE = 64  # 256
@@ -14,7 +14,7 @@ DROPOUT = 0.2
 N_HEAD = 3  # 4
 N_EMBED = 64 * N_HEAD  # 32
 TRAIN_SPLIT_RATIO = 0.8
-MODEL_NAME = 'backend/model.pth'
+MODEL_NAME = 'interpreter/model.pth'
 DATASET_NAME = 'interpreter/dataset.pkl'
 
 

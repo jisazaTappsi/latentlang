@@ -148,6 +148,8 @@ Add a template, regenerate data, retrain, and the interpreter has learned new sy
 
 ### 1. Install
 
+Requires Python 3.11+.
+
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -246,14 +248,14 @@ The backend is a FastAPI app served by `uvicorn` and fronted by [Caddy](https://
 
 Set `CORS_ORIGINS` to a comma-separated list of allowed origins (e.g. the CloudFront domain and `https://www.latentlang.com`).
 
-**Run uvicorn** (bind to localhost; Caddy handles the public port):
+**Run gunicorn** (bind to localhost; Caddy handles the public port):
 
 ```bash
 CORS_ORIGINS="https://www.latentlang.com" \
-uvicorn backend.backend:app --host 127.0.0.1 --port 9000
+gunicorn backend.backend:app -w 4 -k uvicorn.workers.UvicornWorker -b 127.0.0.1:9000
 ```
 
-For production, run uvicorn under a process manager (`systemd`, `supervisord`, `pm2`, …) so it restarts on failure and at boot.
+For production, run gunicorn under a process manager (`systemd`, `supervisord`, `pm2`, …) so it restarts on failure and at boot.
 
 **Run Caddy** — two configs are provided:
 
