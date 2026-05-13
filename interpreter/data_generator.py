@@ -606,52 +606,6 @@ def _substitute_params(body, params, args):
     return result
 
 
-def generate_func_call_sample(idx):
-    """Generate a single (call_lex, body_ast) pair with random args.
-    Returns (lex_text, ast_text, x_in, x_out) or Nones on failure."""
-    name, params, body = random.choice(FUNC_TEMPLATES)
-    args = [generate_number() for _ in params]
-
-    call_text = f"{name}({', '.join(args)})"
-    body_text = _substitute_params(body, params, args)
-
-    # Lex the call (model input)
-    lexer_call = basic.Lexer('<stdin>', call_text)
-    call_tokens, error = lexer_call.make_tokens()
-    if error:
-        return None
-    lex_text = ' '.join(t.__repr__() for t in call_tokens)
-
-    # Parse the substituted body (model target)
-    lexer_body = basic.Lexer('<stdin>', body_text)
-    body_tokens, error = lexer_body.make_tokens()
-    if error:
-        return None
-
-    parser = basic.Parser(body_tokens)
-    ast = parser.parse()
-    if ast.error:
-        return None
-    ast_text = f'{tokens.SOF} {ast.node} {tokens.EOF}'
-
-    lex_encoded = data.encode(lex_text, {})
-    ast_encoded = data.encode(ast_text, {})
-    if len(lex_encoded) > BLOCK_SIZE or len(ast_encoded) > BLOCK_SIZE:
-        return None
-
-    x_in = data.add_pad_tokens_and_trim(lex_encoded, BLOCK_SIZE)
-    x_out = data.add_pad_tokens_and_trim(ast_encoded, BLOCK_SIZE)
-    return {
-        'lexer_text': f'\n{lex_text}',
-        'ast_text': f'\n{ast_text}',
-        'text': call_text,
-        'x_in': [x_in],
-        'x_out': [x_out],
-        'symbols': {'_output_list': []},
-        'id': idx,
-    }
-
-
 class Sample:
     lexer_text: str
     ast_text: str
@@ -743,8 +697,10 @@ def generate():
                 lex_encoded = data.encode(lexer_text, {})
                 ast_encoded = data.encode(ast_text, {})
                 if len(lex_encoded) <= BLOCK_SIZE and len(ast_encoded) <= BLOCK_SIZE:
-                    sample.x_in.append(data.add_pad_tokens_and_trim(lex_encoded, BLOCK_SIZE))
-                    sample.x_out.append(data.add_pad_tokens_and_trim(ast_encoded, BLOCK_SIZE))
+                    # The +1 more token to divide it between x and y upstream on the get_batch method.
+                    truncate_size = BLOCK_SIZE + 1
+                    sample.x_in.append(data.add_pad_tokens_and_trim(lex_encoded, truncate_size))
+                    sample.x_out.append(data.add_pad_tokens_and_trim(ast_encoded, truncate_size))
                     sample.symbols |= symbol_table.symbols
                     if res.value:
                         sample.symbols['_output_list'].append(res.value)

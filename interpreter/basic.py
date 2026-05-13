@@ -1573,7 +1573,7 @@ def inference(token_list):
     """
     lex_text = ' '.join(t.__repr__() for t in token_list)
 
-    lex_merges, ast_merges = data.get_merges()
+    lex_merges, ast_merges = {}, {}  # data.get_merges()
     lex_encoded = data.encode(lex_text, lex_merges)
     lex_encoded = data.add_pad_tokens_and_trim(lex_encoded, BLOCK_SIZE)
 

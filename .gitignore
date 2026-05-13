@@ -224,3 +224,5 @@ frontend/.output/
 # Local AWS profiles/credentials (use AWS_CONFIG_FILE / AWS_SHARED_CREDENTIALS_FILE)
 .aws/
 *.pem
+production_commands
+.DS_Store

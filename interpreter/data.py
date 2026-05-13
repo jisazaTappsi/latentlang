@@ -5,8 +5,9 @@ import pandas as pd
 from .util import *
 from .tokens import *
 
-lex_vocab_size = 255 + len(TOKENS)  # Source (Lexer) vocabulary size
-ast_vocab_size = 255 + len(TOKENS)  # Target (AST) vocabulary size
+lex_vocab_size = 256 + len(TOKENS)  # Source (Lexer) vocabulary size
+print('lex_vocab_size:', lex_vocab_size)
+ast_vocab_size = 256 + len(TOKENS)  # Target (AST) vocabulary size
 max_merge_samples = 10_000
 
 
@@ -148,10 +149,9 @@ def save_code_merges_dummy():
     save_merge_to_file('ast', {})
 
 
-def add_pad_tokens_and_trim(ids, block_size):
-    """the +1 more token to divide it between x and y upstream on the get_batch method."""
-    ids = ids[:block_size]  # Truncate/pad to block_size
-    return ids + [TOKEN_IDS[PAD]] * max(0, block_size - len(ids) + 1)
+def add_pad_tokens_and_trim(ids, truncate_size):
+    ids = ids[:truncate_size]  # Truncate/pad to block_size
+    return ids + [TOKEN_IDS[PAD]] * max(0, truncate_size - len(ids))
 
 
 def df_to_tensors(df):
