@@ -2,9 +2,27 @@
 
 **The language of latent intent.**
 
-LatentLang features a trainable AI interpreter and a non-rigid, free-variable syntax that adapts to your mental model. No more fighting rigid compilers: Latent learns your methods and executes your logic with fluid precision. Define the variables, train the core, and watch your intent manifest as code.
+LatentLang is a trainable AI interpreter with non-rigid syntax. Two things make it different:
 
-Try these examples on the web REPL here: www.latentlang.com:
+1. **Trainable core** — supply new functions and the interpreter learns them as first-class language features.
+2. **Non-rigid syntax** — the interpreter recovers your intent even when the code has typos or unfamiliar shapes.
+
+Try it on the [web REPL](https://www.latentlang.com):
+
+```
+> 2 plus 2
+4
+```
+
+Add a typo — the interpreter still understands:
+
+```
+> 2 pluss 2
+4
+```
+
+The same intent can be written many ways, and every form below is a valid program:
+
 ```
 > var my_var = 12        # JS var
 12
@@ -24,26 +42,29 @@ Every line above is a valid program to LatentLang. The AI compiler translates wh
 
 ---
 
+## Intuition behind LatentLang
+
+LatentLang grew out of a simple observation: most bugs are not deep logical failures, they are small ambiguities — places where the programmer's intent is clear to a human reader but not quite aligned with what the compiler accepts. Today's toolchains treat every such ambiguity as an outright error. A neural compiler can instead *resolve* it — reading the surrounding intent the way another engineer would, and producing the canonical form the machine needs to execute.
+
+
 ## Why LatentLang
 
-Traditional interpreters and compilers reject anything that doesn't match their grammar to the character. LatentLang does the opposite: it treats the grammar as a *target*, not a *gate*. A Cross-Attention Transformer learns the mapping from **free-form source** (your mental model) to a **rigid AST** (the executable core).
+Traditional interpreters reject anything that doesn't match their grammar character-for-character, and you can't teach them new syntax without rewriting the grammar.
+
+LLMs are flexible at understanding intent, but they don't actually compute — they predict the next token and can hallucinate.
+
+LatentLang is the hybrid: non-rigid like an LLM, but computes like an interpreter.
 
 - **Free-variable syntax** — write `3 plus 4`, `3 + 4`, `plus(3,4)`, `3.plus(4)`; all valid.
 - **Trainable core** — the compiler is a Cross-Attention Transformer. Teach it new methods by adding templates and retraining.
 - **Deterministic execution** — once the AST is produced, a classical tree-walking interpreter runs it. No hallucinated results.
 - **Graceful fallback** — a hand-written parser tries first; the AI only kicks in when the input doesn't fit the formal grammar.
 
-This flexibility enables LatentLang to potentially learn millions of functions and build high level languages that get closer to English. 
-
 
 ## LatentLang Potential
 
 LatentLang is an MVP for a new way of building interpreters and compilers. The same architecture could ingest the entire PyPI ecosystem and train a single model that understands every known Python library as a first-class language feature — opening the door to a new breed of high-level languages that sit much closer to English than anything available today.
 
-
-## Intuition behind LatentLang
-
-LatentLang grew out of a simple observation: most bugs are not deep logical failures, they are small ambiguities — places where the programmer's intent is clear to a human reader but not quite aligned with what the compiler accepts. Today's toolchains treat every such ambiguity as an outright error. A neural compiler can instead *resolve* it — reading the surrounding intent the way another engineer would, and producing the canonical form the machine needs to execute.
 
 
 ---
