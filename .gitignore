@@ -226,3 +226,6 @@ frontend/.output/
 *.pem
 production_commands
 .DS_Store
+
+frontend/scripts/settings.ini
+medium_article.txt

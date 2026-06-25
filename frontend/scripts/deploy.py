@@ -6,7 +6,6 @@ Usage: python scripts/deploy_s3.py --bucket YOUR_BUCKET
 
 from __future__ import annotations
 
-import argparse
 import mimetypes
 import os
 import subprocess
@@ -14,6 +13,7 @@ import sys
 from pathlib import Path
 
 import boto3
+from decouple import Config, RepositoryIni
 
 CACHE_ASSETS = "public, max-age=31536000, immutable"
 CACHE_HTML = "public, max-age=0, must-revalidate"
@@ -35,10 +35,9 @@ def main() -> None:
     repo_root = frontend_dir.parent
     source = frontend_dir / ".output" / "public"
 
-    p = argparse.ArgumentParser()
-    p.add_argument("--bucket", required=True)
-    p.add_argument("--distribution", required=True, help="CloudFront distribution ID to invalidate")
-    args = p.parse_args()
+    config = Config(RepositoryIni(str(Path(__file__).resolve().parent / "settings.ini")))
+    bucket = config("BUCKET")
+    distribution = config("DISTRIBUTION")
 
     cred = repo_root / ".aws" / "credentials"
     if cred.is_file():
@@ -60,10 +59,10 @@ def main() -> None:
     s3 = session.client("s3", region_name="us-east-1")
 
     paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=args.bucket):
+    for page in paginator.paginate(Bucket=bucket):
         objs = [{"Key": o["Key"]} for o in page.get("Contents", [])]
         if objs:
-            s3.delete_objects(Bucket=args.bucket, Delete={"Objects": objs})
+            s3.delete_objects(Bucket=bucket, Delete={"Objects": objs})
             for o in objs:
                 print(f"deleted {o['Key']}")
 
@@ -73,7 +72,7 @@ def main() -> None:
             key = path.relative_to(source).as_posix()
             s3.upload_file(
                 str(path),
-                args.bucket,
+                bucket,
                 key,
                 ExtraArgs={"ContentType": content_type(path), "CacheControl": cache_control(path)},
             )
@@ -81,10 +80,10 @@ def main() -> None:
 
     cf = session.client("cloudfront")
     cf.create_invalidation(
-        DistributionId=args.distribution,
+        DistributionId=distribution,
         InvalidationBatch={"Paths": {"Quantity": 1, "Items": ["/*"]}, "CallerReference": str(int(__import__("time").time()))},
     )
-    print(f"invalidated {args.distribution}")
+    print(f"invalidated {distribution}")
 
 
 if __name__ == "__main__":
