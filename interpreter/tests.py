@@ -275,3 +275,68 @@ def test_arithmetic_styles():
     assert res.error is None
     assert isinstance(res.value, basic.Number)
     assert res.value.value == 12
+
+
+def test_power_operator():
+    """Test the power operator: 2 ^ 3"""
+    value, error = basic.run('<stdin>', "2 ^ 3")
+
+    assert error is None
+    assert isinstance(value, basic.Number)
+    assert value.value == 8
+
+
+def test_power_to_zero():
+    """Test the power operator with exponent 0: 5 ^ 0"""
+    value, error = basic.run('<stdin>', "5 ^ 0")
+
+    assert error is None
+    assert isinstance(value, basic.Number)
+    assert value.value == 1
+
+
+def test_power_is_right_associative():
+    """Test that power is right-associative: 2 ^ 3 ^ 2 == 2 ^ (3 ^ 2) == 512"""
+    value, error = basic.run('<stdin>', "2 ^ 3 ^ 2")
+
+    assert error is None
+    assert isinstance(value, basic.Number)
+    assert value.value == 512
+
+
+def test_string_literal():
+    """Test a simple string literal: "hello\""""
+    value, error = basic.run('<stdin>', '"hello"')
+
+    assert error is None
+    assert isinstance(value, basic.String)
+    assert value.value == "hello"
+
+
+def test_string_concatenation():
+    """Test concatenating two strings: "foo" + "bar\""""
+    value, error = basic.run('<stdin>', '"foo" + "bar"')
+
+    assert error is None
+    assert isinstance(value, basic.String)
+    assert value.value == "foobar"
+
+
+def test_string_repetition():
+    """Test repeating a string with a number: "ab" * 3"""
+    value, error = basic.run('<stdin>', '"ab" * 3')
+
+    assert error is None
+    assert isinstance(value, basic.String)
+    assert value.value == "ababab"
+
+
+def test_string_escape_chars():
+    """Test that escape sequences are handled during lexing: "a\\nb\""""
+    lexer = basic.Lexer('<stdin>', '"a\\nb"')
+    tokens, error = lexer.make_tokens()
+
+    assert error is None
+    # Should produce SOF, STRING, EOF
+    assert tokens[1].type == basic.STRING
+    assert tokens[1].value == "a\nb"
