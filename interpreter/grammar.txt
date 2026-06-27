@@ -6,12 +6,16 @@ comp-expr  : NOT comp-expr
 
 arith-expr : term ((PLUS|MINUS) term)*
 
-term       : call ((MUL|DIV|IDENTIFIER) call)*   # IDENTIFIER infix ≡ binary function call by name
+term       : factor ((MUL|DIV|IDENTIFIER) factor)*   # IDENTIFIER infix ≡ binary function call by name
 
-call       : factor (LPAREN (expr (COMMA expr)*)? RPAREN)?
+factor     : (PLUS|MINUS) factor
+           : power
 
-factor     : INT|FLOAT|IDENTIFIER
-           : (PLUS|MINUS) factor
+power      : call (POW factor)*
+
+call       : atom (LPAREN (expr (COMMA expr)*)? RPAREN)?
+
+atom       : INT|FLOAT|STRING|IDENTIFIER
            : LPAREN expr RPAREN
            : if-expr
            : for-expr

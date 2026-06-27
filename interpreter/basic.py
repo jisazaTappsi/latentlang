@@ -174,6 +174,8 @@ class Lexer:
                 token_list.append(self.make_number())
             elif self.current_char in LETTERS:
                 token_list.append(self.make_identifier())
+            elif self.current_char == '"':
+                token_list.append(self.make_string())
             elif self.current_char == '+':
                 token_list.append(Token(PLUS, pos_start=self.pos))
                 self.advance()
@@ -184,6 +186,9 @@ class Lexer:
                 self.advance()
             elif self.current_char == '/':
                 token_list.append(Token(DIV, pos_start=self.pos))
+                self.advance()
+            elif self.current_char == '^':
+                token_list.append(Token(POW, pos_start=self.pos))
                 self.advance()
             elif self.current_char == '(':
                 token_list.append(Token(LPAREN, pos_start=self.pos))
@@ -231,6 +236,30 @@ class Lexer:
             return Token(INT, int(num_str), pos_start, self.pos)
         else:
             return Token(FLOAT, float(num_str), pos_start, self.pos)
+
+    def make_string(self):
+        s = ''
+        pos_start = self.pos.copy()
+        is_escape_char = False
+        self.advance()
+        escape_chars = {
+            'n': '\n',
+            't': '\t',
+        }
+
+        while self.current_char is not None and (self.current_char != '"' or is_escape_char):
+            if is_escape_char:
+                s += escape_chars.get(self.current_char, self.current_char)
+                is_escape_char = False
+            else:
+                if self.current_char == '\\':
+                    is_escape_char = True
+                else:
+                    s += self.current_char
+            self.advance()
+
+        self.advance()
+        return Token(STRING, s, pos_start, self.pos)
 
     def make_identifier(self):
         id_str = ''
@@ -297,6 +326,16 @@ class Lexer:
 
 
 class NumberNode:
+    def __init__(self, tok):
+        self.tok = tok
+        self.pos_start = self.tok.pos_start
+        self.pos_end = self.tok.pos_end
+
+    def __repr__(self):
+        return f'{self.tok}'
+
+
+class StringNode:
     def __init__(self, tok):
         self.tok = tok
         self.pos_start = self.tok.pos_start
@@ -604,18 +643,11 @@ class Parser:
             ))
         return res
 
-    def factor(self):
+    def atom(self):
         res = ParseResult()
         tok = self.current_tok
 
-        if tok.type in (PLUS, MINUS):
-            res.register_advance()
-            self.advance()
-            factor = res.register(self.factor())
-            if res.error: return res
-            return res.success(UnaryOpNode(tok, factor))
-
-        elif tok.type in (INT, FLOAT):
+        if tok.type in (INT, FLOAT):
             res.register_advance()
             self.advance()
             return res.success(NumberNode(tok))
@@ -624,6 +656,11 @@ class Parser:
             res.register_advance()
             self.advance()
             return res.success(VarAccessNode(tok))
+
+        elif tok.type == STRING:
+            res.register_advance()
+            self.advance()
+            return res.success(StringNode(tok))
 
         elif tok.type == LPAREN:
             res.register_advance()
@@ -660,6 +697,7 @@ class Parser:
             if res.error: return res
             return res.success(func_def)
 
+        # Includes errors from power and factor too, because it's only called from there.
         return res.failure(InvalidSyntaxError(
             tok.pos_start, tok.pos_end,
             f"Expected '{IF}', '{FOR}', '{WHILE}', '{FUN}', {VAR}  int, float, '+', '-', '(' or identifier but got '{tok.type}'"
@@ -907,15 +945,31 @@ class Parser:
         return res.success(FuncDefNode(var_name_tok, arg_name_toks, node_to_return))
 
     def term(self):
-        return self.bin_op(self.call, (MUL, DIV, IDENTIFIER))
+        return self.bin_op(self.factor, (MUL, DIV, IDENTIFIER))
+
+    def factor(self):
+        res = ParseResult()
+        tok = self.current_tok
+
+        if tok.type in (PLUS, MINUS):
+            res.register_advance()
+            self.advance()
+            factor = res.register(self.factor())
+            if res.error: return res
+            return res.success(UnaryOpNode(tok, factor))
+
+        return self.power()
+
+    def power(self):
+        return self.bin_op(self.call, (POW, ), self.factor)
 
     def call(self):
         res = ParseResult()
-        factor = res.register(self.factor())
+        atom = res.register(self.atom())
         if res.error: return res
 
         if self.current_tok.type != LPAREN:
-            return res.success(factor)
+            return res.success(atom)
 
         res.register_advance()
         self.advance()
@@ -946,7 +1000,7 @@ class Parser:
 
             res.register_advance()
             self.advance()
-        return res.success(CallNode(factor, arg_nodes))
+        return res.success(CallNode(atom, arg_nodes))
 
     def arith_expr(self):
         return self.bin_op(self.term, (PLUS, MINUS))
@@ -1005,16 +1059,18 @@ class Parser:
             ))
         return res.success(node)
 
-    def bin_op(self, func, ops):
+    def bin_op(self, func_a, ops, func_b=None):
+        if func_b is None: func_b = func_a
+
         res = ParseResult()
-        left = res.register(func())
+        left = res.register(func_a())
         if res.error: return res
 
         while self.current_tok.type in ops or (self.current_tok.type, self.current_tok.value) in ops:
             op_tok = self.current_tok
             res.register_advance()
             self.advance()
-            right = res.register(func())
+            right = res.register(func_b())
             if res.error: return res
 
             left = BinOpNode(left, op_tok, right)
@@ -1150,6 +1206,12 @@ class Number(Value):
         else:
             return None, Value.illegal_operation(self.pos_start, self.pos_end)
 
+    def pow_by(self, other):
+        if isinstance(other, Number):
+            return Number((self.value ** other.value)).set_context(self.context), None
+        else:
+            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+
     def get_comparison_eq(self, other):
         if isinstance(other, Number):
             return Number(int(self.value == other.value)).set_context(self.context), None
@@ -1204,6 +1266,7 @@ class Number(Value):
         copy.set_pos(self.pos_start, self.pos_end)
         copy.set_context(self.context)
         return copy
+
     def is_true(self):
         return self.value != 0
 
@@ -1213,6 +1276,35 @@ class Number(Value):
     def __repr__(self):
         return str(self.value)
 
+
+class String(Value):
+    def __init__(self, value):
+        super().__init__()
+        self.value = value
+
+    def added_to(self, other):
+        if isinstance(other, String):
+            return String(self.value + other.value).set_context(self.context), None
+        else:
+            return None, Value.illegal_operation(self, other)
+
+    def mul_by(self, other):
+        if isinstance(other, Number):
+            return String(self.value * other.value).set_context(self.context), None
+        else:
+            return None, Value.illegal_operation(self, other)
+
+    def is_true(self):
+        return len(self.value) > 0
+
+    def copy(self):
+        copy = String(self.value)
+        copy.set_pos(self.pos_start, self.pos_end)
+        copy.set_context(self.context)
+        return copy
+
+    def __repr__(self):
+        return f'"{self.value}"'
 
 class Function(Value):
     """Callable value: used for both ``f(x,y)`` and infix ``x f y`` when ``f`` names this function."""
@@ -1337,6 +1429,11 @@ class Interpreter:
             Number(node.tok.value).set_context(context).set_pos(node.pos_start, node.pos_end)
         )
 
+    def visit_StringNode(self, node, context):
+        return RTResult().success(
+            String(node.tok.value).set_context(context).set_pos(node.pos_start, node.pos_end)
+        )
+
     def visit_VarAccessNode(self, node, context):
         res = RTResult()
         var_name = node.var_name_tok.value
@@ -1389,6 +1486,8 @@ class Interpreter:
             result, error = left.mul_by(right)
         elif node.op_tok.type == DIV:
             result, error = left.div_by(right)
+        elif node.op_tok.type == POW:
+            result, error = left.pow_by(right)
         elif node.op_tok.type == EE:
             result, error = left.get_comparison_eq(right)
         elif node.op_tok.type == NE:
