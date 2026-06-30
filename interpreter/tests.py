@@ -151,12 +151,12 @@ def test_function_def_and_calls():
     assert isinstance(value, basic.Number)
     assert value.value == 17
 
-    # f()
+    # no args, call
     value, error = basic.run('<stdin>', "f()")
     assert error is not None
     assert isinstance(error, basic.RTError)
 
-    # f(3,4,5)
+    # call
     value, error = basic.run('<stdin>', "f(3,4,5)")
     assert error is not None
     assert isinstance(error, basic.RTError)
@@ -228,49 +228,50 @@ def test_learned_infix_operators():
 
 
 def test_arithmetic_styles():
-    # std function => sum(3,4)
+    # Std function
     res, _ = basic.run_ai('<stdin>', "sum(3,4)")
     assert res.error is None
     assert isinstance(res.value, basic.Number)
     assert res.value.value == 7
 
-    # with no parenthesis => times 8 8
+    # Missing parenthesis
     res, _ = basic.run_ai('<stdin>', "mul(8 8)")
     assert res.error is None
     assert isinstance(res.value, basic.Number)
     assert res.value.value == 64
 
-    # natural language => 3 plus 4
-    res, _ = basic.run_ai('<stdin>', "3 plus 4")
+    # Infix functions
+    res, _ = basic.run_ai('<stdin>', "4 plus 4")
     assert res.error is None
     assert isinstance(res.value, basic.Number)
-    assert res.value.value == 7
+    assert res.value.value == 8
 
-    # with spaces => 3     times    3
+    # Infix with spaces
     res, _ = basic.run_ai('<stdin>', "3     times    3")
     assert res.error is None
     assert isinstance(res.value, basic.Number)
     assert res.value.value == 9
 
-    # calling method => 3.sum(4)
+    # Calling method
     res, _ = basic.run_ai('<stdin>', "3.sum(4)")
     assert res.error is None
     assert isinstance(res.value, basic.Number)
     assert res.value.value == 7
 
-    # calling method, no paren => 3.times 4
+
+    # Calling method, missing parent
     res, _ = basic.run_ai('<stdin>', "3.times 4")
     assert res.error is None
     assert isinstance(res.value, basic.Number)
     assert res.value.value == 12
 
-    # calculator style => 3 + 4
+    # Calculator style
     res, _ = basic.run_ai('<stdin>', "3 + 4")
     assert res.error is None
     assert isinstance(res.value, basic.Number)
     assert res.value.value == 7
 
-    # calculator style => 3 * 4
+    # Calculator style 2
     res, _ = basic.run_ai('<stdin>', "3 * 4")
     assert res.error is None
     assert isinstance(res.value, basic.Number)
