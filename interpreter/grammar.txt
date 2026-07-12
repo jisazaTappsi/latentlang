@@ -13,7 +13,9 @@ factor     : (PLUS|MINUS) factor
 
 power      : call (POW factor)*
 
-call       : atom (LPAREN (expr (COMMA expr)*)? RPAREN)?
+call       : atom (call-args | DOT IDENTIFIER call-args)*   # f(args) and obj.method(args), e.g. list.index(0)
+
+call-args  : LPAREN (expr (COMMA expr)*)? RPAREN
 
 atom       : INT|FLOAT|STRING|IDENTIFIER
            : LPAREN expr RPAREN

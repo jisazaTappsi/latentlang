@@ -34,6 +34,7 @@ WHILE = 'while'
 COMMA = 'comma'
 ARROW = 'arrow'
 FUN = 'def'
+DOT = 'DOT'
 # Add new tokens here
 
 
@@ -79,6 +80,7 @@ TOKENS = [
     COMMA,
     ARROW,
     FUN,
+    DOT,
     # Add new tokens here
 
     EOF,

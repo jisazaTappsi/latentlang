@@ -156,9 +156,9 @@ class Token:
 
 class Lexer:
     def __init__(self,fn, text):
-        self.text = text
-        self.pos = Position(-1, 0, -1, fn, text)
-        self.current_char = None
+        self.text: str = text
+        self.pos: Position = Position(-1, 0, -1, fn, text)
+        self.current_char: str | None = None
         self.advance()
 
     def advance(self):
@@ -170,8 +170,10 @@ class Lexer:
         while self.current_char is not None:
             if self.current_char in [' ', '\t']:
                 self.advance()
-            elif self.current_char in DIGITS + '.':
+            elif self.current_char in DIGITS:
                 token_list.append(self.make_number())
+            elif self.current_char == '.':
+                token_list.append(self.make_dot_or_number())
             elif self.current_char in LETTERS:
                 token_list.append(self.make_identifier())
             elif self.current_char == '"':
@@ -242,6 +244,16 @@ class Lexer:
             return Token(INT, int(num_str), pos_start, self.pos)
         else:
             return Token(FLOAT, float(num_str), pos_start, self.pos)
+
+    def make_dot_or_number(self):
+        # A '.' starts a decimal number when followed by a digit (e.g. ".5"),
+        # otherwise it is the member-access operator (e.g. "list.index(0)").
+        pos_start = self.pos.copy()
+        next_char = self.text[self.pos.idx + 1] if self.pos.idx + 1 < len(self.text) else None
+        if next_char is not None and next_char in DIGITS:
+            return self.make_number()
+        self.advance()
+        return Token(DOT, pos_start=pos_start)
 
     def make_string(self):
         s = ''
@@ -469,6 +481,24 @@ class CallNode:
     def __repr__(self):
         args = ' '.join(str(a) for a in self.arg_nodes)
         return f'({self.node_to_call}({args}))'
+
+
+class MethodCallNode:
+    """A ``obj.name(args)`` member-method call, e.g. ``mylist.index(0)``."""
+    def __init__(self, object_node, method_name_tok, arg_nodes):
+        self.object_node = object_node
+        self.method_name_tok = method_name_tok
+        self.arg_nodes = arg_nodes
+
+        self.pos_start = self.object_node.pos_start
+        if len(self.arg_nodes) > 0:
+            self.pos_end = self.arg_nodes[-1].pos_end
+        else:
+            self.pos_end = self.method_name_tok.pos_end
+
+    def __repr__(self):
+        args = ' '.join(str(a) for a in self.arg_nodes)
+        return f'({self.object_node}.{self.method_name_tok.value}({args}))'
 
 
 ########################
@@ -1034,15 +1064,45 @@ class Parser:
         atom = res.register(self.atom())
         if res.error: return res
 
+        # Postfix chain: f(args) calls and obj.name(args) method calls, e.g.
+        # ``mylist.index(0)`` or ``f(x).index(0)``.
+        while self.current_tok.type in (LPAREN, DOT):
+            if self.current_tok.type == DOT:
+                res.register_advance()
+                self.advance()
+                if self.current_tok.type != IDENTIFIER:
+                    return res.failure(InvalidSyntaxError(
+                        self.current_tok.pos_start, self.current_tok.pos_end,
+                        f"Expected method name after '.' but got {self.current_tok.type}"
+                    ))
+                method_name_tok = self.current_tok
+                res.register_advance()
+                self.advance()
+                arg_nodes = res.register(self.call_args())
+                if res.error: return res
+                atom = MethodCallNode(atom, method_name_tok, arg_nodes)
+            else:
+                arg_nodes = res.register(self.call_args())
+                if res.error: return res
+                atom = CallNode(atom, arg_nodes)
+
+        return res.success(atom)
+
+    def call_args(self):
+        """Parse a parenthesised, comma-separated argument list and return the nodes."""
+        res = ParseResult()
         if self.current_tok.type != LPAREN:
-            return res.success(atom)
+            return res.failure(InvalidSyntaxError(
+                self.current_tok.pos_start, self.current_tok.pos_end,
+                f"Expected '(' but got {self.current_tok.type}"
+            ))
 
         res.register_advance()
         self.advance()
         if self.current_tok.type == RPAREN:
             res.register_advance()
             self.advance()
-            return res.success(CallNode(atom, []))
+            return res.success([])
 
         arg_nodes = [res.register(self.expr())]
         if res.error:
@@ -1067,7 +1127,7 @@ class Parser:
         res.register_advance()
         self.advance()
 
-        return res.success(CallNode(atom, arg_nodes))
+        return res.success(arg_nodes)
 
     def arith_expr(self):
         return self.bin_op(self.term, (PLUS, MINUS))
@@ -1452,16 +1512,25 @@ class List(Value):
                 self.context
             )
 
-    def div_by(self, other):
-        if not isinstance(other, Number):
-            return None, Value.illegal_operation(self, other)
+    def method_index(self, args):
+        """``list.index(i)`` -> the element at position ``i`` (replaces the old ``list / i``)."""
+        if len(args) != 1:
+            return None, RTError(
+                self.pos_start, self.pos_end,
+                f'index() takes exactly 1 argument ({len(args)} given)',
+                self.context
+            )
+
+        index = args[0]
+        if not isinstance(index, Number):
+            return None, Value.illegal_operation(self, index)
 
         try:
-            return self.elements[other.value], None
+            return self.elements[index.value], None
         except IndexError:
             return None, RTError(
-                other.pos_start, other.pos_end,
-                'Element at this index could not be retrieved from list because index is out or range',
+                index.pos_start, index.pos_end,
+                'Element at this index could not be retrieved from list because index is out of range',
                 self.context
             )
 
@@ -1761,6 +1830,31 @@ class Interpreter:
         return_value = res.register(self._invoke_function(value_to_call, args))
         if res.error: return res
         return res.success(return_value)
+
+    def visit_MethodCallNode(self, node, context):
+        res = RTResult()
+
+        obj = res.register(self.visit(node.object_node, context))
+        if res.error: return res
+
+        args = []
+        for arg_node in node.arg_nodes:
+            args.append(res.register(self.visit(arg_node, context)))
+            if res.error: return res
+
+        method_name = node.method_name_tok.value
+        method = getattr(obj, f'method_{method_name}', None)
+        if method is None:
+            return res.failure(RTError(
+                node.method_name_tok.pos_start, node.method_name_tok.pos_end,
+                f"'{type(obj).__name__.lower()}' has no method '{method_name}'",
+                context,
+            ))
+
+        result, error = method(args)
+        if error:
+            return res.failure(error)
+        return res.success(result.set_context(context).set_pos(node.pos_start, node.pos_end))
 
 
 ########################
