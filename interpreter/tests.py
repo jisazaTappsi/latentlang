@@ -341,3 +341,124 @@ def test_string_escape_chars():
     # Should produce SOF, STRING, EOF
     assert tokens[1].type == basic.STRING
     assert tokens[1].value == "a\nb"
+
+
+########################
+# BUILT-IN FUNCTIONS
+########################
+
+def test_list_literal():
+    """Test a list literal evaluates to a List with the right elements: [1, 2, 3]"""
+    value, error = basic.run('<stdin>', "[1, 2, 3]")
+
+    assert error is None
+    assert isinstance(value, basic.List)
+    assert [el.value for el in value.elements] == [1, 2, 3]
+
+
+def test_is_number_builtin():
+    """is_num returns true for numbers and false otherwise."""
+    value, error = basic.run('<stdin>', "is_num(5)")
+    assert error is None
+    assert value.value == 1
+
+    value, error = basic.run('<stdin>', 'is_num("hi")')
+    assert error is None
+    assert value.value == 0
+
+
+def test_is_string_builtin():
+    """is_str returns true for strings and false otherwise."""
+    value, error = basic.run('<stdin>', 'is_str("hi")')
+    assert error is None
+    assert value.value == 1
+
+    value, error = basic.run('<stdin>', "is_str(5)")
+    assert error is None
+    assert value.value == 0
+
+
+def test_is_list_builtin():
+    """is_list returns true for lists and false otherwise."""
+    value, error = basic.run('<stdin>', "is_list([1, 2])")
+    assert error is None
+    assert value.value == 1
+
+    value, error = basic.run('<stdin>', "is_list(5)")
+    assert error is None
+    assert value.value == 0
+
+
+def test_is_function_builtin():
+    """is_fun returns true for functions (including built-ins) and false otherwise."""
+    value, error = basic.run('<stdin>', "is_fun(pop)")
+    assert error is None
+    assert value.value == 1
+
+    value, error = basic.run('<stdin>', "is_fun(5)")
+    assert error is None
+    assert value.value == 0
+
+
+def test_append_builtin():
+    """append mutates the list in place and returns null."""
+    value, error = basic.run('<stdin>', "var append_list = [1, 2]")
+    assert error is None
+
+    value, error = basic.run('<stdin>', "append(append_list, 3)")
+    assert error is None
+    assert value.value == basic.Number.null.value
+
+    value, error = basic.run('<stdin>', "append_list")
+    assert error is None
+    assert [el.value for el in value.elements] == [1, 2, 3]
+
+
+def test_append_non_list_errors():
+    """append on a non-list first argument raises a runtime error."""
+    value, error = basic.run('<stdin>', "append(5, 3)")
+    assert error is not None
+    assert isinstance(error, basic.RTError)
+
+
+def test_pop_builtin():
+    """pop removes and returns the element at the given index."""
+    value, error = basic.run('<stdin>', "var pop_list = [10, 20, 30]")
+    assert error is None
+
+    value, error = basic.run('<stdin>', "pop(pop_list, 1)")
+    assert error is None
+    assert isinstance(value, basic.Number)
+    assert value.value == 20
+
+    value, error = basic.run('<stdin>', "pop_list")
+    assert error is None
+    assert [el.value for el in value.elements] == [10, 30]
+
+
+def test_pop_out_of_range_errors():
+    """pop with an out-of-range index raises a runtime error."""
+    value, error = basic.run('<stdin>', "pop([1, 2], 5)")
+    assert error is not None
+    assert isinstance(error, basic.RTError)
+
+
+def test_extend_builtin():
+    """extend appends all elements of the second list onto the first and returns null."""
+    value, error = basic.run('<stdin>', "var extend_list = [1, 2]")
+    assert error is None
+
+    value, error = basic.run('<stdin>', "extend(extend_list, [3, 4])")
+    assert error is None
+    assert value.value == basic.Number.null.value
+
+    value, error = basic.run('<stdin>', "extend_list")
+    assert error is None
+    assert [el.value for el in value.elements] == [1, 2, 3, 4]
+
+
+def test_extend_non_list_errors():
+    """extend with a non-list second argument raises a runtime error."""
+    value, error = basic.run('<stdin>', "extend([1, 2], 3)")
+    assert error is not None
+    assert isinstance(error, basic.RTError)
