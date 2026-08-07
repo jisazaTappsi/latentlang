@@ -19,6 +19,8 @@ GT = 'GT'
 LT = 'LT'
 GTE = 'GTE'
 LTE = 'LTE'
+NEWLINE = 'NEWLINE'
+
 AND = 'and'
 OR = 'or'
 NOT = 'not'
@@ -34,6 +36,7 @@ WHILE = 'while'
 COMMA = 'comma'
 ARROW = 'arrow'
 FUN = 'def'
+END = 'end'
 # Add new tokens here
 
 
@@ -79,6 +82,7 @@ TOKENS = [
     COMMA,
     ARROW,
     FUN,
+    END,
     # Add new tokens here
 
     EOF,
