@@ -112,7 +112,10 @@ def get_merges():
 
 def get_compressed_tokens(text):
     tokens_text = ','.join(str(int(i)) for i in text.encode('utf-8'))
-    for token_id, token  in TOKEN_BASIC_IDS.items():
+
+    # Substitute longest pattern first (maximal munch)
+    longest_matches = sorted(TOKEN_BASIC_IDS.items(), key=lambda kv: len(kv[1]), reverse=True)
+    for token_id, token  in longest_matches:
         tokens_text = tokens_text.replace(token, str(token_id))
     return [int(i) for i in tokens_text.split(',')]
 

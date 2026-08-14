@@ -67,22 +67,9 @@ TOKENS = [
     LT,
     GTE,
     LTE,
-    AND,
-    OR,
-    NOT,
-    VAR,
-    IF,
-    THEN,
-    ELIF,
-    ELSE,
-    FOR,
-    TO,
-    STEP,
-    WHILE,
     COMMA,
     ARROW,
-    FUN,
-    END,
+    NEWLINE,
     # Add new tokens here
 
     EOF,
@@ -104,7 +91,10 @@ KEYWORDS = [
     STEP,
     WHILE,
     FUN,
+    END,
 ]
+
+TOKENS += KEYWORDS
 
 TOKEN_BASIC_IDS = {
     256 + idx: ','.join(str(int(i)) for i in t.encode('utf-8')) for idx, t in enumerate(TOKENS)

@@ -413,12 +413,16 @@ def _get_compiled_op_templates():
 
 
 def _load_template_functions_into_context(context):
-    """Inject template bodies for FUNC names and for infix OP names (used at runtime via visit_BinOp + Function)."""
+    """
+    Inject template bodies for FUNC names and for infix OP names (used at runtime via visit_BinOp + Function).
+    Pure functions need should_return_node=False, while block functions would be should_return_node=True
+    """
     for name, params, body_node in _get_compiled_func_templates():
-        func_value = basic.Function(name, body_node, params).set_context(context).set_pos()
+        func_value = basic.Function(name, body_node, params, should_return_node=False).set_context(context).set_pos()
         context.symbol_table.set(name, func_value)
+
     for name, params, body_node in _get_compiled_op_templates():
-        func_value = basic.Function(name, body_node, params).set_context(context).set_pos()
+        func_value = basic.Function(name, body_node, params, should_return_node=False).set_context(context).set_pos()
         context.symbol_table.set(name, func_value)
 
 

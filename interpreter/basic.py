@@ -530,7 +530,7 @@ class Parser:
         return self.current_tok
 
     def reverse(self, amount=1):
-        self.tok_idx += amount
+        self.tok_idx -= amount
         self.update_current_tok()
         return self.current_tok
 
@@ -794,8 +794,9 @@ class Parser:
 
     def if_expr(self):
         res = ParseResult()
-        cases, else_case = res.register(self.if_expr_cases(IF))
+        all_cases = res.register(self.if_expr_cases(IF))
         if res.error: return res
+        cases, else_case = all_cases  # Needs to unpack after checking for errors, as res.node = None when res.error.
         return res.success(IfNode(cases, else_case))
 
     def if_expr_cases(self, case_keyword):
@@ -836,16 +837,19 @@ class Parser:
                 res.register_advance()
                 self.advance()
             else:
-                new_cases, else_case = res.register(self.if_expr_b_or_c())
+                all_cases = res.register(self.if_expr_b_or_c())
                 if res.error: return res
+                new_cases, else_case = all_cases  # Needs to unpack after checking for errors, as res.node = None when res.error.
                 cases.extend(new_cases)
         else:
             expr = res.register(self.expr())
             if res.error: return res
             cases.append((condition, expr, False))  # Assignable to variable
 
-            new_cases, else_case = res.register(self.if_expr_b_or_c())
+            all_cases = res.register(self.if_expr_b_or_c())
             if res.error: return res
+            new_cases, else_case = all_cases  # Needs to unpack after checking for errors, as res.node = None when res.error.
+
             cases.extend(new_cases)
 
         return res.success((cases, else_case))
@@ -854,9 +858,9 @@ class Parser:
         res = ParseResult()
 
         if self.current_tok.matches(KEYWORD, ELIF):
-            cases, else_case = res.register(self.if_expr_b())
+            all_cases = res.register(self.if_expr_b())
         elif self.current_tok.matches(KEYWORD, ELSE):
-            cases, else_case = res.register(self.if_expr_c())
+            all_cases = res.register(self.if_expr_c())
         else:
             return res.failure(InvalidSyntaxError(
                 self.current_tok.pos_start, self.current_tok.pos_end,
@@ -864,6 +868,7 @@ class Parser:
             ))
 
         if res.error: return res
+        cases, else_case = all_cases  # Needs to unpack after checking for errors, as res.node = None when res.error.
         return res.success((cases, else_case))
 
     def if_expr_b(self):
@@ -2064,7 +2069,7 @@ class Interpreter:
             elements.append(res.register(self.visit(node.body_node, context)))
             if res.error: return res
 
-        if node.should_return_node:
+        if node.should_return_null:
             return res.success(Number.null)
 
         return res.success(
@@ -2084,7 +2089,7 @@ class Interpreter:
             elements.append(res.register(self.visit(node.body_node, context)))
             if res.error: return res
 
-        if node.should_return_node:
+        if node.should_return_null:
             return res.success(Number.null)
 
         return res.success(
@@ -2097,7 +2102,7 @@ class Interpreter:
         func_name = node.var_name_tok.value if node.var_name_tok else None
         body_node = node.body_node
         arg_names = [arg_name.value for arg_name in node.arg_name_toks]
-        func_value = Function(func_name, body_node, arg_names, node.should_return_node).set_context(context).set_pos()
+        func_value = Function(func_name, body_node, arg_names, node.should_return_null).set_context(context).set_pos()
 
         if node.var_name_tok:
             context.symbol_table.set(func_name, func_value)
