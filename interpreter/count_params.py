@@ -18,12 +18,12 @@ model = CrossAttentionTransformer()
 model = model.to(device)
 
 # Load the saved state dict
-model.load_state_dict(torch.load(code_model_name))
+model.load_state_dict(torch.load(MODEL_NAME))
 model.eval()
 
 param_count = count_parameters(model)
 token_count = data_to_params_ratio * param_count
-df = pd.read_pickle(dataset_name)
+df = pd.read_pickle(DATASET_NAME)
 df = df.head(max_samples_count_params)
 
 lex_merges, ast_merges = data.get_merges()
@@ -36,7 +36,7 @@ print(f'Total model params: {param_count}')
 print(f'Should train on {token_count} tokens')
 sentences = round(token_count/avg_tokens_per_sentence)
 print(f'Should train on {sentences} sentences')
-print(f'Should train for {round(sentences / batch_size)} iterations')
+print(f'Should train for {round(sentences / BATCH_SIZE)} iterations')
 print(f'stats are: {avg_tokens_per_sentence=}, {statistics.stdev(lens1)=}, {max(lens1)=}, {min(lens1)=}')
 
 # cut below which 99.7% of samples lie.
