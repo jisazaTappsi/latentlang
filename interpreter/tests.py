@@ -245,7 +245,8 @@ def test_learned_infix_operators():
     dg._load_template_functions_into_context(context)
     res = basic.Interpreter().visit(ast.node, context)
     assert res.error is None
-    assert res.value.value == 7 + 64
+    # Parsing enters at `statements`, so the result is a List holding one statement value.
+    assert [el.value for el in res.value.elements] == [7 + 64]
 
 
 def test_arithmetic_styles():
@@ -289,14 +290,16 @@ def test_arithmetic_styles():
     # Calculator style
     res, _ = basic.run_ai('<stdin>', "3 + 4")
     assert res.error is None
-    assert isinstance(res.value, basic.Number)
-    assert res.value.value == 7
+    number = res.value.elements[0]
+    assert isinstance(number, basic.Number)
+    assert number.value == 7
 
     # Calculator style 2
     res, _ = basic.run_ai('<stdin>', "3 * 4")
     assert res.error is None
-    assert isinstance(res.value, basic.Number)
-    assert res.value.value == 12
+    number = res.value.elements[0]
+    assert isinstance(number, basic.Number)
+    assert number.value == 12
 
 
 def test_power_operator():

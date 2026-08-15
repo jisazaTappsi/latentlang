@@ -368,6 +368,18 @@ _COMPILED_FUNC_TEMPLATES = None
 _COMPILED_OP_TEMPLATES = None
 
 
+def _unwrap_single_statement(node):
+    """Strip the `statements` ListNode that `Parser.parse` wraps around a lone expression.
+
+    Template bodies are single expressions, and a `Function` returns whatever its body
+    node evaluates to. Left wrapped, every template call would return List([value])
+    instead of value, so `7 + (8 times 8)` becomes an illegal operation.
+    """
+    if isinstance(node, basic.ListNode) and len(node.element_nodes) == 1:
+        return node.element_nodes[0]
+    return node
+
+
 def _get_compiled_func_templates():
     """Compile FUNC_TEMPLATES body expressions into AST nodes once."""
     global _COMPILED_FUNC_TEMPLATES
@@ -384,7 +396,7 @@ def _get_compiled_func_templates():
         ast = parser.parse()
         if ast.error:
             continue
-        compiled.append((name, params, ast.node))
+        compiled.append((name, params, _unwrap_single_statement(ast.node)))
 
     _COMPILED_FUNC_TEMPLATES = compiled
     return _COMPILED_FUNC_TEMPLATES
@@ -406,7 +418,7 @@ def _get_compiled_op_templates():
         ast = parser.parse()
         if ast.error:
             continue
-        compiled.append((name, params, ast.node))
+        compiled.append((name, params, _unwrap_single_statement(ast.node)))
 
     _COMPILED_OP_TEMPLATES = compiled
     return _COMPILED_OP_TEMPLATES

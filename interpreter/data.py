@@ -124,7 +124,7 @@ def load_code_tokens():
     df = pd.read_pickle(DATASET_NAME)
     train_df = get_train_data(df).head(max_merge_samples)
 
-    lex_text = ' '.join(train_df['lex_text'].tolist())
+    lex_text = ' '.join(train_df['lexer_text'].tolist())
     ast_text = ' '.join(train_df['ast_text'].tolist())
 
     lex_tokens = get_compressed_tokens(lex_text)

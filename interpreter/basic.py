@@ -363,6 +363,15 @@ class ListNode:
         self.pos_start = pos_start
         self.pos_end = pos_end
 
+    def __repr__(self):
+        # A lone statement renders as itself, so single-statement AST text is unchanged
+        # by `statements` becoming the parse entry point. Several are NEWLINE-separated,
+        # which `get_tree_from_string` splits on before its arity dispatch.
+        if len(self.element_nodes) == 1:
+            return f'{self.element_nodes[0]}'
+        separator = f' {NEWLINE} '
+        return f'({separator.join(str(node) for node in self.element_nodes)})'
+
 
 class VarAccessNode:
     def __init__(self, var_name_tok):
@@ -651,6 +660,13 @@ class Parser:
             token_list.append(current_token.strip())
         
         token_list = [t for t in token_list if t]  # Remove empty token_list
+
+        # Statements: (stmt NEWLINE stmt ...). Must come before the arity checks below,
+        # or a two-statement list is indistinguishable from a BinOpNode.
+        if NEWLINE in token_list:
+            dummy_pos = Position(0, 0, 0, '<string>', '')
+            element_nodes = [Parser.get_tree_from_string(t) for t in token_list if t != NEWLINE]
+            return ListNode(element_nodes, dummy_pos, dummy_pos)
 
         if len(token_list) == 1:
             return Parser.get_tree_from_string(token_list[0])
@@ -1397,9 +1413,9 @@ class Value:
         raise Exception('No copy method defined')
 
     def illegal_operation(self, other=None):
-        if not other: other = self
+        if not other: other = self  # Unary ops pass no operand, so the error spans this value alone.
         return RTError(
-            self.pos_start, self.pos_end,
+            self.pos_start, other.pos_end,
             'Illegal operation',
             self.context
         )
@@ -1413,19 +1429,19 @@ class Number(Value):
         if isinstance(other, Number):
             return Number((self.value + other.value)).set_context(self.context), None
         else:
-            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+            return None, self.illegal_operation(other)
 
     def sub_by(self, other):
         if isinstance(other, Number):
             return Number((self.value - other.value)).set_context(self.context), None
         else:
-            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+            return None, self.illegal_operation(other)
 
     def mul_by(self, other):
         if isinstance(other, Number):
             return Number((self.value * other.value)).set_context(self.context), None
         else:
-            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+            return None, self.illegal_operation(other)
 
     def div_by(self, other):
         if isinstance(other, Number):
@@ -1436,59 +1452,61 @@ class Number(Value):
                                      context=self.context)
             return Number((self.value / other.value)).set_context(self.context), None
         else:
-            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+            return None, self.illegal_operation(other)
 
     def pow_by(self, other):
         if isinstance(other, Number):
             return Number((self.value ** other.value)).set_context(self.context), None
         else:
-            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+            return None, self.illegal_operation(other)
 
     def get_comparison_eq(self, other):
         if isinstance(other, Number):
             return Number(int(self.value == other.value)).set_context(self.context), None
         else:
-            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+            return None, self.illegal_operation(other)
 
     def get_comparison_ne(self, other):
         if isinstance(other, Number):
             return Number(int(self.value != other.value)).set_context(self.context), None
+        else:
+            return None, self.illegal_operation(other)
 
     def get_comparison_lt(self, other):
         if isinstance(other, Number):
             return Number(int(self.value < other.value)).set_context(self.context), None
         else:
-            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+            return None, self.illegal_operation(other)
 
     def get_comparison_gt(self, other):
         if isinstance(other, Number):
             return Number(int(self.value > other.value)).set_context(self.context), None
         else:
-            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+            return None, self.illegal_operation(other)
 
     def get_comparison_lte(self, other):
         if isinstance(other, Number):
             return Number(int(self.value <= other.value)).set_context(self.context), None
         else:
-            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+            return None, self.illegal_operation(other)
 
     def get_comparison_gte(self, other):
         if isinstance(other, Number):
             return Number(int(self.value >= other.value)).set_context(self.context), None
         else:
-            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+            return None, self.illegal_operation(other)
 
     def anded_by(self, other):
         if isinstance(other, Number):
             return Number(int(self.value and other.value)).set_context(self.context), None
         else:
-            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+            return None, self.illegal_operation(other)
 
     def ored_by(self, other):
         if isinstance(other, Number):
             return Number(int(self.value or other.value)).set_context(self.context), None
         else:
-            return None, Value.illegal_operation(self.pos_start, self.pos_end)
+            return None, self.illegal_operation(other)
 
     def notted(self):
         return Number(int(self.value == 0)).set_context(self.context), None
