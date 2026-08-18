@@ -75,19 +75,27 @@ LatentLang is an MVP for a new way of building interpreters and compilers. The s
      source text
          │
          ▼
- ┌───────┴───────┐        
- │ Lexer/Parser  │── syntax error ───┐ 
- └───────┬───────┘                   │
-         │                           ▼
-         │ AST ok            ┌───────┴───────┐
-         │                   │ AI Transformer│
-         │                   └───────┬───────┘   
-         │◀──────── AST ok ──────────┘
- ┌───────┴──────────────┐
- │ Classical Interpreter│ 
- └───────┬──────────────┘
-         │
-         ▼
+ ┌───────┴───────┐
+ │ Lexer/Parser  │── syntax error ──┐
+ └───────┬───────┘                  │
+         │ AST ok                   │
+         ▼                          │
+ ┌───────┴──────────────┐           │
+ │ Classical Interpreter│           │
+ └───────┬──────────────┘           │
+         │                          │
+         │ runtime error ───────────┤
+         │                          ▼
+         │                  ┌───────┴───────┐
+         │                  │ AI Transformer│
+         │                  └───────┬───────┘
+         │                          │ AST (retry, no further fallback)
+         │                          ▼
+         │                  ┌───────┴──────────────┐
+         │                  │ Classical Interpreter│
+         │                  └───────┬──────────────┘
+         │                          │
+         ▼◀─────────────────────────┘
      result
 ```
 
