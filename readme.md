@@ -89,7 +89,7 @@ LatentLang is an MVP for a new way of building interpreters and compilers. The s
          │                  ┌───────┴───────┐
          │                  │ AI Transformer│
          │                  └───────┬───────┘
-         │                          │ AST (retry, no further fallback)
+         │                          │ AST (retry)
          │                          ▼
          │                  ┌───────┴──────────────┐
          │                  │ Classical Interpreter│

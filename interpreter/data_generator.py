@@ -356,6 +356,8 @@ FUNC_TEMPLATES = [
     ("thrice2", ["x"], "x*3"),
     ("tilt", ["a", "b"], "a-b"),
     ("times", ["a", "b"], "a*b"),
+    ("minus", ["a", "b"], "a-b"),
+    ("subtract", ["a", "b"], "a-b"),
     ("times8", ["x"], "x*8"),
     ("triple", ["n"], "n+n+n"),
     ("twin", ["x"], "x+x"),
@@ -427,14 +429,15 @@ def _get_compiled_op_templates():
 def _load_template_functions_into_context(context):
     """
     Inject template bodies for FUNC names and for infix OP names (used at runtime via visit_BinOp + Function).
-    Pure functions need should_return_node=False, while block functions would be should_return_node=True
+    Template bodies are bare expressions with no explicit `return`, so they need
+    should_auto_return=True; block-bodied functions would use False and return explicitly.
     """
     for name, params, body_node in _get_compiled_func_templates():
-        func_value = basic.Function(name, body_node, params, should_return_node=False).set_context(context).set_pos()
+        func_value = basic.Function(name, body_node, params, should_auto_return=True).set_context(context).set_pos()
         context.symbol_table.set(name, func_value)
 
     for name, params, body_node in _get_compiled_op_templates():
-        func_value = basic.Function(name, body_node, params, should_return_node=False).set_context(context).set_pos()
+        func_value = basic.Function(name, body_node, params, should_auto_return=True).set_context(context).set_pos()
         context.symbol_table.set(name, func_value)
 
 
@@ -720,8 +723,7 @@ def generate():
                     sample.symbols |= symbol_table.symbols
                     if res.value:
                         sample.symbols['_output_list'].append(res.value)
-                else:
-                    #print('Encodings are too long...')
+                else:  # Encodings are too long.
                     invalid_count += 1
                     is_valid = False
                     break

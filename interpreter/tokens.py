@@ -1,6 +1,6 @@
-INT = 'INT'
-FLOAT = 'FLOAT'
-STRING = 'STRING'
+INT = 'int'
+FLOAT = 'float'
+STRING = 'string'
 IDENTIFIER = 'IDENTIFIER'
 KEYWORD = 'KEYWORD'
 PLUS = 'PLUS'
@@ -20,6 +20,9 @@ LT = 'LT'
 GTE = 'GTE'
 LTE = 'LTE'
 NEWLINE = 'NEWLINE'
+RETURN = 'return'
+CONTINUE = 'continue'
+BREAK = 'break'
 
 AND = 'and'
 OR = 'or'
@@ -92,6 +95,9 @@ KEYWORDS = [
     WHILE,
     FUN,
     END,
+    RETURN,
+    CONTINUE,
+    BREAK,
 ]
 
 TOKENS += KEYWORDS
