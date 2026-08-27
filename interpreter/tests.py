@@ -102,6 +102,16 @@ def test_parsing_syntax_error_missing_operand():
     assert ast is None
 
 
+def test_parsing_reports_error_in_later_semicolon_separated_statement():
+    source = "var a=[];var i = 0;while i<10 then;var i=i+1;if i=4 then continue;if i==8 then break;var a=a+i;end"
+
+    ast, error = basic.run('<stdin>', source)
+
+    assert ast is None
+    assert isinstance(error, basic.InvalidSyntaxError)
+    assert error.pos_start.idx == source.index('=', source.index('if i=4'))
+
+
 def test_parsing_comprehensive_valid_ast():
     """Test parsing a complex expression that covers all main features:
     - Integers and floats
@@ -656,6 +666,18 @@ def test_inline_while_returns_list_of_body_values():
     assert error is None
     assert isinstance(elements[-1], basic.List)
     assert [el.value for el in elements[-1].elements] == [1, 2, 3]
+
+
+def test_inline_while_control_flow_does_not_add_nulls_to_accumulator():
+    source = (
+        "var a=[];var i = 0;while i<20 then;var i=i+1;"
+        "if i==4 then continue;if i==8 then break;var a=a+i;end"
+    )
+
+    elements, error = run_statements(source)
+
+    assert error is None
+    assert [el.value for el in elements[0].elements] == [1, 2, 3, 5, 6, 7]
 
 
 def test_multiline_while_returns_null():

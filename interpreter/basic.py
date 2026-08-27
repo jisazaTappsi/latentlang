@@ -1318,8 +1318,11 @@ class Parser:
                 more_statements = False
 
             if not more_statements: break
-            statement = res.try_register(self.statement())
+            statement_res = self.statement()
+            statement = res.try_register(statement_res)
             if not statement:
+                if statement_res.advance_count > 0:
+                    return res.failure(statement_res.error)
                 self.reverse(res.to_reverse_count)
                 more_statements = False
                 continue
@@ -1896,7 +1899,8 @@ class List(Value):
         return ', '.join([str(e) for e in self.elements])
 
     def __repr__(self):
-        return f'[{', '.join([str(e) for e in self.elements])}]'
+        # repr (not str) on the elements, so a nested list keeps its brackets
+        return f'[{', '.join([repr(e) for e in self.elements])}]'
 
     def add_to(self, other):
         new_list = self.copy()
