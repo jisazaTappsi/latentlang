@@ -172,6 +172,8 @@ class Lexer:
         while self.current_char is not None:
             if self.current_char in [' ', '\t']:
                 self.advance()
+            elif self.current_char == '#':
+                self.skip_comment()
             elif self.current_char in ';\n':
                 token_list.append(Token(NEWLINE, pos_start=self.pos))
                 self.advance()
@@ -331,6 +333,12 @@ class Lexer:
             self.advance()
             tok_type = GTE
         return Token(tok_type, pos_start=pos_start, pos_end=self.pos)
+
+    def skip_comment(self):
+        self.advance()  # advance past comment
+        while self.current_char is not None and self.current_char not in '\n':
+            self.advance()
+
 
 ########################
 # NODES
@@ -1670,7 +1678,7 @@ class BaseFunction(Value):
         new_context.symbol_table = SymbolTable(new_context.parent.symbol_table)
         return new_context
 
-    def check_args(self, arg_names, args):
+    def check_same_len(self, arg_names, args):
         res = RTResult()
 
         if len(args) != len(arg_names):
@@ -1683,15 +1691,13 @@ class BaseFunction(Value):
         return res.success(None)
 
     def populate_args(self, arg_names, args, exec_ctx):
-        for i in range(len(args)):
-            arg_name = arg_names[i]
-            arg_value = args[i]
+        for arg_name, arg_value in zip(arg_names, args):
             arg_value.set_context(exec_ctx)
             exec_ctx.symbol_table.set(arg_name, arg_value)
 
     def check_and_populate_args(self, arg_names, args, exec_ctx):
         res = RTResult()
-        res.register(self.check_args(arg_names, args))
+        res.register(self.check_same_len(arg_names, args))
         if res.should_return(): return res
         self.populate_args(arg_names, args, exec_ctx)
         return res.success(None)
@@ -1876,6 +1882,40 @@ class BuiltInFunction(BaseFunction):
         return RTResult().success(Number.null)
     execute_extend.arg_names = ['list_a', 'list_b']
 
+    def execute_len(self, exec_ctx):
+        list_ = exec_ctx.symbol_table.get('list')
+        if not isinstance(list_, List):
+            return RTResult().failure(
+                RTError(self.pos_start, self.pos_end, "Argument must be a list", exec_ctx))
+
+        return RTResult().success(Number(len(list_.elements)))
+    execute_len.arg_names = ['list']
+
+    def execute_run(self, exec_ctx):
+        fn = exec_ctx.symbol_table.get('fn')
+        if not isinstance(fn, String):
+            return RTResult().failure(
+                RTError(self.pos_start, self.pos_end, "Argument must be a string", exec_ctx))
+
+        fn = fn.value  # Python string
+
+        try:
+            with open(fn, 'r') as f:
+                script = f.read()
+        except Exception as e:
+            return RTResult().failure(
+                RTError(self.pos_start, self.pos_end, f'Failed to load script "{fn}"\n{str(e)}', exec_ctx,))
+
+        _, error = run(fn, script)
+        if error:
+            return RTResult().failure(RTError(
+                self.pos_start, self.pos_end, f'Failed to finish executing script "{fn}"\n{error.as_string()}',
+                exec_ctx,))
+
+        return RTResult().success(Number.null)
+    execute_run.arg_names = ['fn']
+
+
 BuiltInFunction.print        = BuiltInFunction("print")
 BuiltInFunction.print_ret    = BuiltInFunction("print_ret")
 BuiltInFunction.input        = BuiltInFunction("input")
@@ -1888,6 +1928,8 @@ BuiltInFunction.is_function  = BuiltInFunction("is_function")
 BuiltInFunction.append       = BuiltInFunction("append")
 BuiltInFunction.pop          = BuiltInFunction("pop")
 BuiltInFunction.extend       = BuiltInFunction("extend")
+BuiltInFunction.len          = BuiltInFunction("len")
+BuiltInFunction.run          = BuiltInFunction("run")
 
 
 class List(Value):
@@ -2314,6 +2356,9 @@ global_symbol_table.set("is_fun", BuiltInFunction.is_function)
 global_symbol_table.set("append", BuiltInFunction.append)
 global_symbol_table.set("pop", BuiltInFunction.pop)
 global_symbol_table.set("extend", BuiltInFunction.extend)
+global_symbol_table.set("len", BuiltInFunction.len)
+global_symbol_table.set("run", BuiltInFunction.run)
+
 
 def run(fn, text):
     lexer = Lexer(fn, text)

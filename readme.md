@@ -220,6 +220,22 @@ basic > x times x
 100
 ```
 
+#### Running the example.lt program
+
+From the shell do:
+
+```bash
+run('example.lt')
+```
+
+Should see:
+
+```bash
+hello latent!
+Successfully executed your first LatentLang script!
+0
+```
+
 ### 4. Run the API + web REPL
 
 Backend:

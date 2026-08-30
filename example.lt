@@ -1,0 +1,33 @@
+# LatentLang script example
+
+def ops(prefix) -> prefix + 'oops'  # inline function
+
+def join(elements, separator)
+    # Joins elements in a list.
+    var res = ''
+    var length = len(elements)
+    for i = 0 to length then
+        var res = res + elements/i
+        if i != length-1 then
+            var res = res + separator
+        end
+    end
+    return res
+end
+
+def map(elements, func)
+    # Map implementation on a function
+    var new_elements = []
+    for i=0 to len(elements) then
+        append(new_elements, func(elements/i))
+    end
+    return new_elements
+end
+
+print('hello latent!')
+
+for i=0 to 2 then
+    join(map(['l', 'sp'], ops), ', ')
+end
+
+print('Successfully executed your first LatentLang script!')
