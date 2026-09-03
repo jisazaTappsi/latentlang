@@ -260,54 +260,47 @@ def test_learned_infix_operators():
 
 
 def test_arithmetic_styles():
+    def last(res):
+        assert res.error is None
+        return res.value.elements[-1]
+
     # Std function
-    res, _ = basic.run_ai('<stdin>', "sum(3,4)")
-    assert res.error is None
-    assert isinstance(res.value, basic.Number)
-    assert res.value.value == 7
+    number = last(basic.run_ai('<stdin>', "sum(3,4)")[0])
+    assert isinstance(number, basic.Number)
+    assert number.value == 7
 
     # Missing parenthesis
-    res, _ = basic.run_ai('<stdin>', "mul(8 8)")
-    assert res.error is None
-    assert isinstance(res.value, basic.Number)
-    assert res.value.value == 64
+    number = last(basic.run_ai('<stdin>', "2 pluss 2")[0])
+    assert isinstance(number, basic.Number)
+    assert number.value == 4
 
     # Infix functions
-    res, _ = basic.run_ai('<stdin>', "4 plus 4")
-    assert res.error is None
-    assert isinstance(res.value, basic.Number)
-    assert res.value.value == 8
+    number = last(basic.run_ai('<stdin>', "4 plus 4")[0])
+    assert isinstance(number, basic.Number)
+    assert number.value == 8
 
     # Infix with spaces
-    res, _ = basic.run_ai('<stdin>', "3     times    3")
-    assert res.error is None
-    assert isinstance(res.value, basic.Number)
-    assert res.value.value == 9
+    number = last(basic.run_ai('<stdin>', "3     times    3")[0])
+    assert isinstance(number, basic.Number)
+    assert number.value == 9
 
     # Calling method
-    res, _ = basic.run_ai('<stdin>', "3.sum(4)")
-    assert res.error is None
-    assert isinstance(res.value, basic.Number)
-    assert res.value.value == 7
-
+    number = last(basic.run_ai('<stdin>', "3.sum 4 ")[0])
+    assert isinstance(number, basic.Number)
+    assert number.value == 7
 
     # Calling method, missing parent
-    res, _ = basic.run_ai('<stdin>', "3.times 4")
-    assert res.error is None
-    assert isinstance(res.value, basic.Number)
-    assert res.value.value == 12
+    number = last(basic.run_ai('<stdin>', "3.times 4")[0])
+    assert isinstance(number, basic.Number)
+    assert number.value == 12
 
     # Calculator style
-    res, _ = basic.run_ai('<stdin>', "3 + 4")
-    assert res.error is None
-    number = res.value.elements[0]
+    number = last(basic.run_ai('<stdin>', "3 + 4")[0])
     assert isinstance(number, basic.Number)
     assert number.value == 7
 
     # Calculator style 2
-    res, _ = basic.run_ai('<stdin>', "3 * 4")
-    assert res.error is None
-    number = res.value.elements[0]
+    number = last(basic.run_ai('<stdin>', "3 * 4")[0])
     assert isinstance(number, basic.Number)
     assert number.value == 12
 

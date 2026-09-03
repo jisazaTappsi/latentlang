@@ -1941,7 +1941,6 @@ class List(Value):
         return ', '.join([str(e) for e in self.elements])
 
     def __repr__(self):
-        # repr (not str) on the elements, so a nested list keeps its brackets
         return f'[{', '.join([repr(e) for e in self.elements])}]'
 
     def add_to(self, other):
@@ -2405,7 +2404,7 @@ def inference(token_list):
         ast = parser.parse()
         return ast.node
 
-    return ast_node
+    return ListNode([ast_node], ast_node.pos_start, ast_node.pos_end)
 
 
 def run_interpreter(symbol_table, ast_node):
