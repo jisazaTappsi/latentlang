@@ -538,7 +538,9 @@ def _parse_one_ast_node(s: str, start: int):
         if close == -1:
             return None, start
         return s[start : close + 1], close + 1
-    m = re.match(r'[A-Z_]+:[^\s()]+', s[start:])
+    # Type tags are lowercase for literals (int:5, float:1.2) and uppercase for the
+    # rest (IDENTIFIER:x, KEYWORD:not), so the class has to cover both.
+    m = re.match(r'[A-Za-z_]+:[^\s()]+', s[start:])
     if m:
         return m.group(0), start + len(m.group(0))
     return None, start

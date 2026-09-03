@@ -4,7 +4,7 @@ while True:
     text = input('basic > ')
     if text.strip() == '': continue
 
-    result, _ = basic.run_ai('<stdin>', text, force_interpreter=True)
+    result, _ = basic.run_ai('<stdin>', text, force_interpreter=False)
 
     if result.error:
         print(result.error.as_string())
