@@ -1,3 +1,5 @@
+import pytest
+
 from . import basic
 from . import data
 from . import tokens
@@ -239,8 +241,16 @@ def test_function_def_and_calls():
     assert isinstance(error, basic.RTError)
 
 
+@pytest.mark.parametrize('source', ["5(1)", '"text"()', "[1](0)"])
+def test_calling_a_non_function_is_a_runtime_error(source):
+    value, error = basic.run('<stdin>', source)
+
+    assert isinstance(error, basic.RTError)
+    assert error.details == 'Illegal operation'
+
+
 def test_learned_infix_operators():
-    """Infix template ops (e.g. 8 times 8); meaning from data_generator templates + symbol table only."""
+    """Infix template ops (e.g. 8 times 8); meaning from the templates + symbol table only."""
     from . import data_generator as dg
 
     text = '7+8 times 8'
@@ -381,6 +391,28 @@ def test_list_literal():
     assert error is None
     assert isinstance(value, basic.List)
     assert [el.value for el in value.elements] == [1, 2, 3]
+
+
+@pytest.mark.parametrize('operation, result', [
+    ("l + 3", "[1, 2, 3]"),  # append
+    ("l * [3]", "[1, 2, 3]"),  # extend
+    ("l - 0", "[2]"),  # remove at index
+])
+def test_list_operators_leave_their_operand_unchanged(operation, result):
+    """`+`, `*` and `-` build a new list: `var m = l + 3` must not also append to `l`."""
+    elements, error = run_statements(f"var l = [1, 2]; var m = {operation}; l")
+
+    assert error is None
+    assert repr(elements[1]) == result
+    assert repr(elements[2]) == "[1, 2]"
+
+
+def test_list_builtins_still_change_the_list_in_place():
+    """Unlike the operators, append/extend/pop mutate the list the variable holds."""
+    elements, error = run_statements("var l = [1, 2]; append(l, 3); extend(l, [4]); pop(l, 0); l")
+
+    assert error is None
+    assert repr(elements[-1]) == "[2, 3, 4]"
 
 
 def test_is_number_builtin():
@@ -664,13 +696,13 @@ def test_inline_while_returns_list_of_body_values():
 def test_inline_while_control_flow_does_not_add_nulls_to_accumulator():
     source = (
         "var a=[];var i = 0;while i<20 then;var i=i+1;"
-        "if i==4 then continue;if i==8 then break;var a=a+i;end"
+        "if i==4 then continue;if i==8 then break;var a=a+i;end;a"
     )
 
     elements, error = run_statements(source)
 
     assert error is None
-    assert [el.value for el in elements[0].elements] == [1, 2, 3, 5, 6, 7]
+    assert [el.value for el in elements[-1].elements] == [1, 2, 3, 5, 6, 7]
 
 
 def test_multiline_while_returns_null():
@@ -796,3 +828,423 @@ def test_get_compressed_tokens_keeps_newlines_of_a_lexed_program():
     ids = data.get_compressed_tokens(lex_text)
 
     assert ids.count(tokens.TOKEN_IDS[tokens.NEWLINE]) == 2
+
+
+########################
+# AST TEXT ROUND TRIP
+########################
+
+# One program per shape the AST text has to carry, including each block-vs-inline variant,
+# since that flag changes what if/for/while/def evaluate to.
+ROUND_TRIP_PROGRAMS = [
+    # Arithmetic, logic and assignment: the shapes the first generator emitted.
+    "3 + 4.5 * -2",
+    "var a = (1 - 2) / 3 ^ 2",
+    "not True == None and 1 <= 2 or 3 != 4",
+    "def times(a, b) -> a * b; 7 times 8",
+    # Calls
+    "def f(a, b) -> a + b; f(8, 9)",
+    "def g() -> 1; g()",
+    "(def (a) -> a * 2)(4)",
+    "var h = def (x) -> x; h(h(1))",
+    # Strings: spaces, brackets, quotes, colons and newlines must not split the AST text.
+    '"plain"',
+    r'"spaces (parens) [brackets] \"quotes\" back\\slash: colon\nnewline" + "x"',
+    "'single' * 3",
+    # Lists: a one-element list literal must not collapse into a lone statement.
+    "[]",
+    "[7]",
+    '[1, [2, [3]], "s"]',
+    "var l = [1, 2]; l / 0",
+    # If
+    "if 1 then 2",
+    "if 0 then 2 else 3",
+    "if 0 then 1 elif 1 then 2 else 3",
+    "var r = if 0 then 1 elif 0 then 2",
+    "if 1 then\nvar t = 1\nend",
+    "if 0 then\n1\nelif 1 then\nvar t = 2\nvar u = 3\nelse\n4\nend",
+    "if 1 then 5 else\nvar t = 6\nend",
+    # For
+    "for i = 0 to 5 then i * 2",
+    "for i = 10 to 0 step -2 then i",
+    "var s = 0; for i = 0 to 4 then\nvar s = s + i\nend",
+    "for i = 0 to 9 then\nif i == 2 then continue\nif i == 5 then break\nvar last = i\nend",
+    # While
+    "var n = 0; while n < 3 then var n = n + 1",
+    "var n = 0; while 1 then\nvar n = n + 1\nif n > 4 then break\nend",
+    # Block-bodied defs and return
+    "def k(x)\nif x > 0 then return x\nreturn 0 - x\nend; k(-3)",
+    "def nothing()\nreturn\nend; nothing()",
+    "def one()\n1\nend; one()",
+    "def first()\nfor i = 0 to 10 then\nif i == 3 then return i\nend\nend; first()",
+]
+
+
+def parse(source):
+    token_list, error = basic.Lexer('<stdin>', source).make_tokens()
+    assert error is None
+    ast = basic.Parser(token_list).parse()
+    assert ast.error is None, ast.error.as_string()
+    return ast.node
+
+
+def ast_shape(value):
+    """Structure of an AST with source positions dropped, so two trees compare by content."""
+    if isinstance(value, basic.Token):
+        return value.type, value.value
+    if isinstance(value, (list, tuple)):
+        return tuple(ast_shape(v) for v in value)
+    if hasattr(value, '__dict__'):
+        fields = sorted((k, v) for k, v in vars(value).items() if k not in ('pos_start', 'pos_end'))
+        return (type(value).__name__,) + tuple((k, ast_shape(v)) for k, v in fields)
+    return value
+
+
+def as_program(node):
+    """Wrap a rebuilt node the way `basic.inference` does, unless it already is the statements."""
+    if isinstance(node, basic.BlockNode):
+        return node
+    return basic.BlockNode([node], node.pos_start, node.pos_end)
+
+
+def execute(node):
+    res, context = basic.run_interpreter(basic.get_symbol_table(), as_program(node))
+    symbols = {name: repr(value) for name, value in context.symbol_table.symbols.items()}
+    return res.error, repr(res.value), symbols
+
+
+@pytest.mark.parametrize('source', ROUND_TRIP_PROGRAMS)
+def test_ast_text_round_trips(source):
+    ast = parse(source)
+    text = repr(ast)
+
+    rebuilt = basic.AstTextReader.get_tree_from_string(text)
+
+    assert repr(rebuilt) == text
+    # A lone statement renders as itself, so it comes back without its statements wrapper.
+    expected = ast.statement_nodes[0] if len(ast.statement_nodes) == 1 else ast
+    assert ast_shape(rebuilt) == ast_shape(expected)
+
+
+@pytest.mark.parametrize('source', ROUND_TRIP_PROGRAMS)
+def test_ast_text_round_trip_computes_the_same(source):
+    ast = parse(source)
+    rebuilt = basic.AstTextReader.get_tree_from_string(repr(ast))
+
+    error, value, symbols = execute(ast)
+    assert error is None, error.as_string()
+    assert execute(rebuilt) == (None, value, symbols)
+
+
+def test_ast_text_of_generator_shapes_is_unchanged():
+    """The trained checkpoint emits this text, so these shapes must keep their spelling."""
+    assert repr(parse("var a = 3 + -2 * (4 plus 5)")) == \
+        "IDENTIFIER:a:(int:3 PLUS ((MINUS int:2) MUL (int:4 IDENTIFIER:plus int:5)))"
+    assert repr(parse("not True == None and 1.5 < 2; x")) == \
+        "(((KEYWORD:not (IDENTIFIER:True EE IDENTIFIER:None)) KEYWORD:and (float:1.5 LT int:2)) NEWLINE IDENTIFIER:x)"
+
+
+@pytest.mark.parametrize('source', ["[7]", "if 1 then\n7\nend"])
+def test_list_literals_and_blocks_are_different_nodes(source):
+    """`[7]` is a ListNode, while a program and a block body are BlockNodes, also when rebuilt from AST text."""
+    for node in (parse(source), basic.AstTextReader.get_tree_from_string(repr(parse(source)))):
+        program = as_program(node)
+        assert isinstance(program, basic.BlockNode)
+        statement = program.statement_nodes[0]
+        if source == "[7]":
+            assert isinstance(statement, basic.ListNode)
+        else:
+            assert isinstance(statement.cases[0][1], basic.BlockNode)
+
+
+def test_ast_text_call_is_not_a_unary_op():
+    """Args glued to the callee are a call; `(MINUS int:1)` with a space is a unary op."""
+    assert isinstance(basic.AstTextReader.get_tree_from_string("(IDENTIFIER:f(int:1))"), basic.CallNode)
+    assert isinstance(basic.AstTextReader.get_tree_from_string("(MINUS (int:1))"), basic.UnaryOpNode)
+
+
+def test_ast_text_identifier_named_like_a_float_stays_a_name():
+    node = basic.AstTextReader.get_tree_from_string("IDENTIFIER:inf:int:1")
+    assert node.var_name_tok.value == "inf"
+
+
+@pytest.mark.parametrize('text', [
+    "(int:1 PLUS int:2",
+    "(int:1 PLUS int:2))",
+    "(int:1 int:2 int:3 int:4)",
+    "()",
+    "[int:1",
+    'string:"unterminated',
+    "(def int:1 -> int:2)",
+])
+def test_ast_text_malformed_raises(text):
+    """`basic.inference` falls back to the classical parser when rebuilding raises."""
+    with pytest.raises(ValueError):
+        basic.AstTextReader.get_tree_from_string(text)
+
+
+########################
+# TEMPLATE INLINING
+########################
+
+@pytest.mark.parametrize('source, expected', [
+    ("sum(9, 8)", "(int:9 PLUS int:8)"),
+    ("9 sum 8", "(int:9 PLUS int:8)"),
+    ("halve(sum(1, 2))", "((int:1 PLUS int:2) DIV int:2)"),
+    # `sum` is a+b: an argument naming the later parameter `b` must not be substituted again.
+    ("sum(b, 1)", "(IDENTIFIER:b PLUS int:1)"),
+    ("b tilt 1", "(IDENTIFIER:b MINUS int:1)"),
+    # Arguments containing spaces in their AST text.
+    ('sum("a b", "c")', '(string:"a b" PLUS string:"c")'),
+    ("sum([1, 2], 3)", "([int:1 int:2] PLUS int:3)"),
+    # Inside control flow and function bodies.
+    ("for i = 0 to 3 then double(i)", "(for IDENTIFIER:i int:0 int:3 (IDENTIFIER:i PLUS IDENTIFIER:i))"),
+    ("def f(x) -> halve(x)", "(def IDENTIFIER:f(IDENTIFIER:x) -> (IDENTIFIER:x DIV int:2))"),
+    # Left alone: wrong arity, and not a template.
+    ("sum(1)", "(IDENTIFIER:sum(int:1))"),
+    ("f(1, 2)", "(IDENTIFIER:f(int:1 int:2))"),
+])
+def test_inline_templates(source, expected):
+    from . import data_generator as dg
+
+    assert repr(dg.inline_templates(parse(source))) == expected
+
+
+@pytest.mark.parametrize('source', [
+    "var b = 5; sum(b, 1)",
+    "var b = 2; b tilt 11",
+    "7 + 8 times 8",
+    "var x = 3; mid3(x, cube(x), x sum 1)",
+])
+def test_inlined_templates_compute_like_the_template_functions(source):
+    from . import data_generator as dg
+
+    def run_with_templates(node):
+        context = basic.Context('<t>')
+        context.symbol_table = basic.get_symbol_table()
+        dg._load_template_functions_into_context(context)
+        res = basic.Interpreter().visit(node, context)
+        assert res.error is None
+        return repr(res.value)
+
+    ast = parse(source)
+    assert run_with_templates(dg.inline_templates(ast)) == run_with_templates(ast)
+
+
+########################
+# STEP BUDGET
+########################
+
+def run_with_budget(source, max_steps):
+    context = basic.Context('<program>')
+    context.symbol_table = basic.get_symbol_table()
+    return basic.Interpreter(max_steps=max_steps).visit(parse(source), context)
+
+
+# Loops are bounded, so a budget that fails to apply makes the test fail instead of hang.
+@pytest.mark.parametrize('source', [
+    "var i = 0; while i < 1000 then var i = i + 1",
+    "for i = 0 to 1000 then i",
+    # Function bodies run on the caller's Interpreter, by call and by infix use.
+    "def f() -> for i = 0 to 1000 then i; f()",
+    "def g(a, b) -> for i = 0 to 1000 then i; 1 g 2",
+    "def h()\nfor i = 0 to 1000 then i\nend; [h()]",
+])
+def test_step_budget_stops_long_programs(source):
+    res = run_with_budget(source, max_steps=200)
+
+    assert isinstance(res.error, basic.StepLimitError)
+    assert run_with_budget(source, max_steps=None).error is None
+
+
+def test_step_budget_lets_short_programs_finish():
+    res = run_with_budget("for i = 0 to 10 then i * 2", max_steps=200)
+
+    assert res.error is None
+    assert repr(res.value) == "[[0, 2, 4, 6, 8, 10, 12, 14, 16, 18]]"
+
+
+########################
+# AST GENERATOR
+########################
+
+@pytest.fixture(scope='module')
+def generated_programs():
+    import random
+    from collections import Counter
+    from . import data_generator as dg
+
+    state = random.getstate()
+    random.seed(1234)
+    stats = dg.STATS
+    dg.STATS = Counter()
+    try:
+        texts = set()
+        programs = [dg.generate_program(texts) for _ in range(400)]
+        yield programs, dg.STATS
+    finally:
+        dg.STATS = stats
+        random.setstate(state)
+
+
+def test_generated_programs_run_and_fit_the_block(generated_programs):
+    """Checked again from scratch, the way `data_generator.generate` builds samples."""
+    from . import data_generator as dg
+
+    programs, _ = generated_programs
+    for program in programs:
+        context = basic.Context('<program>')
+        context.symbol_table = basic.get_symbol_table()
+        dg._load_template_functions_into_context(context)
+        for text in program:
+            node = parse(text)
+            lex_text = ' '.join(repr(t) for t in basic.Lexer('<stdin>', text).make_tokens()[0])
+            ast_text = f'{tokens.SOF} {dg.inline_templates(node)} {tokens.EOF}'
+            assert len(data.encode(lex_text, {})) <= basic.BLOCK_SIZE, text
+            assert len(data.encode(ast_text, {})) <= basic.BLOCK_SIZE, text
+            res = basic.Interpreter(max_steps=100_000).visit(node, context)
+            assert res.error is None, f'{text}\n{res.error.as_string()}'
+
+
+def test_generator_rejects_nothing_for_syntax_or_python_errors(generated_programs):
+    """Typing is what rules these out; rejections are only for length, duplicates or values."""
+    _, stats = generated_programs
+    rejected = {key for key in stats if key.startswith('rejected')}
+
+    assert rejected <= {'rejected: too long', 'rejected: duplicate', 'rejected: runtime error', 'rejected: step limit',
+                        'rejected: inlining changes the result'}
+    assert stats['rejected: runtime error'] < 0.01 * sum(n for key, n in stats.items() if key.startswith('drawn'))
+
+
+def test_generated_programs_cover_the_language(generated_programs):
+    from . import data_generator as dg
+
+    programs, _ = generated_programs
+    features = set().union(*(dg.ast_features(parse(text)) for program in programs for text in program))
+
+    missing = dg.LANGUAGE_FEATURES - features
+    assert not missing, f'never generated: {sorted(missing)}'
+
+
+def test_build_samples_keeps_every_generated_program():
+    """The generator already checks each statement, so building samples never fails."""
+    import random
+    from . import data_generator as dg
+
+    state = random.getstate()
+    random.seed(7)
+    try:
+        rows, failed = dg.build_samples(30)
+    finally:
+        random.setstate(state)
+
+    assert (len(rows), failed) == (30, 0)
+    assert all(len(row['x_in']) == len(row['x_out']) for row in rows)  # One input/target pair per statement.
+
+
+def generator_after(*statements):
+    """A ProgramGenerator that has already kept `statements`."""
+    from . import data_generator as dg
+
+    generator = dg.ProgramGenerator(set(statements))
+    generator.accepted = [(text, parse(text)) for text in statements]
+    generator.symbols, _ = generator.run([node for _, node in generator.accepted])
+    generator.pending = {}
+    return generator
+
+
+def test_generator_rejects_a_statement_whose_inlined_target_computes_differently():
+    """square(x) inlines to x*x, so `pop` would run twice in the target."""
+    generator = generator_after("var l = [1, 2, 3]")
+
+    assert generator.try_accept("var x = square(pop(l, 0))") == 'inlining changes the result'
+    assert generator.try_accept("var x = square(l / 0)") is None
+
+
+def test_generator_retries_the_kind_a_rejected_setup_was_for(monkeypatch):
+    """A while loop with no counter around gets a setup first; when that setup is rejected, the
+    retry is still for the while loop, not some other statement."""
+    from . import data_generator as dg
+
+    generator = generator_after("var l = [1]")  # A list (so a built-in would fit), no number variable.
+    generator.texts.add("var a = 1")
+    setups = iter([["var a = 1"], ["var b = 1"]])  # The first is a duplicate.
+    monkeypatch.setattr(generator, 'setup_statement', lambda kind: next(setups))
+    monkeypatch.setattr(dg.ProgramGenerator, 'KINDS', {'while': 1})
+
+    assert generator.add_statement()
+    assert [text for text, _ in generator.accepted] == ["var l = [1]", "var b = 1"]
+    assert generator.next_kind == 'while'
+
+
+def test_lexer_stream_quotes_strings():
+    """The model reads this stream: a space or bracket inside a string must not look like a token boundary."""
+    token_list, error = basic.Lexer('<stdin>', 'var p = "by ]"').make_tokens()
+    assert error is None
+
+    assert ' '.join(repr(t) for t in token_list) == 'SOF KEYWORD:var IDENTIFIER:p EQ string:"by ]" EOF'
+
+
+@pytest.mark.parametrize('text, fixed', [
+    ('(IDENTIFIER:e:(string:")" MUL int:0))', '(IDENTIFIER:e:(string:")" MUL int:0))'),  # Balanced: untouched.
+    ('(string:"z(y" PLUS string:"\\"(")', '(string:"z(y" PLUS string:"\\"(")'),  # Escaped quote inside.
+    ('(int:1 PLUS (int:2 MUL int:3)', '(int:1 PLUS (int:2 MUL int:3))'),
+    ('int:1 PLUS int:2)', '(int:1 PLUS int:2)'),
+])
+def test_fix_unmatched_parenthesis_ignores_parens_in_strings(text, fixed):
+    from .train_module import CrossAttentionTransformer
+
+    assert CrossAttentionTransformer.fix_unmatched_parenthesis(text) == fixed
+
+
+def test_symbol_tables_compare_lists_strings_and_functions_by_content():
+    from .samples import symbol_tables_equal
+
+    def symbols(source):
+        context = basic.Context('<program>')
+        context.symbol_table = basic.SymbolTable()
+        basic.Interpreter().visit(parse(source), context)
+        return context.symbol_table.symbols
+
+    program = 'var l = [1, "a"]; var s = "x"; def f(a) -> a'
+    assert symbols(program) is not symbols(program)
+    assert symbol_tables_equal(symbols(program), symbols(program))
+    assert not symbol_tables_equal(symbols(program), symbols('var l = [1, "b"]; var s = "x"; def f(a) -> a'))
+
+
+@pytest.mark.parametrize('target, predicted', [
+    ('def f(a) -> a + 1', 'def f(a) -> a * 2'),  # Same name, different body.
+    ('def f(a) -> a', 'def f(b) -> b'),  # Different parameter.
+    ('def f(a) -> a', 'def f(a)\nreturn a\nend'),  # Arrow vs block body.
+    ('var l = [def (a) -> a + 1]', 'var l = [def (a) -> a * 2]'),  # A function inside a list.
+])
+def test_symbol_tables_compare_functions_by_body_not_name(target, predicted):
+    from .samples import symbol_tables_equal
+
+    def symbols(source):
+        context = basic.Context('<program>')
+        context.symbol_table = basic.SymbolTable()
+        basic.Interpreter().visit(parse(source), context)
+        return context.symbol_table.symbols
+
+    assert symbol_tables_equal(symbols(target), symbols(target))
+    assert not symbol_tables_equal(symbols(target), symbols(predicted))
+
+
+def test_generator_report_measures_the_generator(monkeypatch):
+    pytest.importorskip('coverage')
+    import random
+    from . import generator_report as report
+
+    state = random.getstate()
+    monkeypatch.setattr(report, 'REPORT_PROGRAMS', 50)
+    try:
+        result = report.measure()
+    finally:
+        random.setstate(state)
+
+    interpreter = report.language_functions(result['functions'], 'Interpreter').values()
+    lines_run = sum(s['covered_lines'] for s in interpreter) / sum(s['num_statements'] for s in interpreter)
+
+    assert len(result['rows']) == 50
+    assert lines_run > 0.7  # 2,000 programs run ~95%; even 50 run most of the interpreter.

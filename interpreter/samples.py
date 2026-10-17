@@ -4,7 +4,7 @@ import pandas as pd
 from . import data
 from . import basic
 from .util import *
-from .basic import Parser
+from .basic import AstTextReader
 from .data_generator import print_program
 from .train_module import CrossAttentionTransformer
 
@@ -32,24 +32,33 @@ def sample_decode(my_data, merges):
 
 
 def symbol_tables_equal(pred_symbols, target_symbols):
-    """Compare two symbol-table dicts (name -> basic.Number). Same keys and same numeric values."""
-    if set(pred_symbols.keys()) != set(target_symbols.keys()):
+    """Compare two symbol-table dicts (name -> basic.Value): same names, each holding an equal
+    value (see `values_equal`)."""
+    return pred_symbols.keys() == target_symbols.keys() and \
+        all(values_equal(pred_symbols[name], target_symbols[name]) for name in pred_symbols)
+
+
+def values_equal(p, t):
+    """Whether two runs left the same value. They build distinct objects, so this compares what
+    they hold: numbers within tolerance, lists element by element, user functions by name,
+    parameters, body and return form, anything else (strings, built-ins) by its printed form.
+
+    A function's printed form is only `<function f>`: compared by that, a predicted `f` with a
+    wrong body would count as correct."""
+    if type(p) != type(t):
         return False
-    for name in pred_symbols:
-        p, t = pred_symbols[name], target_symbols[name]
-        if type(p) != type(t):
-            return False
-        if hasattr(p, 'value'):  # basic.Number
-            try:
-                if not torch.allclose(torch.tensor(float(p.value)), torch.tensor(float(t.value))):
-                    return False
-            except (TypeError, ValueError):
-                if p.value != t.value:
-                    return False
-        else:
-            if p != t:
-                return False
-    return True
+    if isinstance(p, basic.Number):
+        try:
+            return bool(torch.allclose(torch.tensor(float(p.value)), torch.tensor(float(t.value))))
+        except (TypeError, ValueError, OverflowError):
+            return p.value == t.value
+    if isinstance(p, basic.List):
+        return len(p.elements) == len(t.elements) and \
+            all(values_equal(a, b) for a, b in zip(p.elements, t.elements))
+    if isinstance(p, basic.Function):
+        return (p.name, p.arg_names, p.should_auto_return, repr(p.body_node)) == \
+            (t.name, t.arg_names, t.should_auto_return, repr(t.body_node))
+    return repr(p) == repr(t)
 
 
 def run(num_samples=100):
@@ -85,7 +94,7 @@ def run(num_samples=100):
             statement_ast_matches.append(predicted_ast_text == target_ast_text)
 
             try:
-                predicted_ast = Parser.get_tree_from_string(predicted_ast_text)
+                predicted_ast = AstTextReader.get_tree_from_string(predicted_ast_text)
                 predicted_res = basic.Interpreter().visit(predicted_ast, predicted_ctx)
                 if predicted_res.error:
                     sample_run_ok = False
@@ -96,7 +105,7 @@ def run(num_samples=100):
                 break
 
             try:
-                target_ast = Parser.get_tree_from_string(target_ast_text)
+                target_ast = AstTextReader.get_tree_from_string(target_ast_text)
                 target_res = basic.Interpreter().visit(target_ast, target_ctx)
                 if target_res.error:
                     sample_run_ok = False

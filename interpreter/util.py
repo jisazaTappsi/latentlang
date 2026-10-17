@@ -14,6 +14,8 @@ DROPOUT = 0.2
 N_HEAD = 3  # 4
 N_EMBED = 64 * N_HEAD  # 32
 TRAIN_SPLIT_RATIO = 0.8
+MAX_INTERPRETER_STEPS = 1_000_000  # ~1s of interpreting; generated programs that run longer are rejected
+REPORT_PROGRAMS = 2_000  # Programs generator_report measures
 MODEL_NAME = f'interpreter/model_{'prod' if PRODUCTION_RUN else 'dev'}.pth'
 DATASET_NAME = f'interpreter/dataset_{'prod' if PRODUCTION_RUN else 'dev'}.pkl'
 

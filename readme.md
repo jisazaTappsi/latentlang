@@ -109,7 +109,9 @@ The AI interpreter is a **Cross-Attention Transformer** (encoder-decoder) traine
 | `interpreter/basic.py`          | Lexer, parser, AST nodes, interpreter, symbol table, error types, `run_ai()` entry point. |
 | `interpreter/grammar.txt`       | Formal grammar the AST targets. |
 | `interpreter/data.py`           | Byte-pair-encoding (BPE) merges over the custom token space; batching into tensors. |
-| `interpreter/data_generator.py` | Synthesizes `(lex_text, ast_text)` pairs using `FUNC_TEMPLATES` — the dictionary of methods the AI learns. |
+| `interpreter/templates.py`      | `FUNC_TEMPLATES` — the dictionary of methods the AI learns. |
+| `interpreter/data_generator.py` | Generates valid programs over the whole language (every statement is run before it's kept) and turns them into `(lex_text, ast_text)` training pairs, inlining `FUNC_TEMPLATES` calls. `python -m interpreter.data_generator` writes the dataset. |
+| `interpreter/generator_report.py` | Measures the generator: valid programs, AST features, and line/branch coverage of `basic.py` (needs `pip install coverage`). |
 | `interpreter/train_module.py`   | `CrossAttentionTransformer` definition and training loop. |
 | `interpreter/train_pipeline.py` | End-to-end: generate data → train → evaluate. |
 | `interpreter/samples.py`        | Scores the trained model: per-sample AST match and symbol-table (computation) match. |
@@ -153,7 +155,7 @@ A very small interpreter and grammar was built as the foundation upon which the 
 
 ## The method dictionary
 
-`data_generator.py` defines `FUNC_TEMPLATES` — a list of `(name, params, body)` tuples like:
+`templates.py` defines `FUNC_TEMPLATES` — a list of `(name, params, body)` tuples like:
 
 ```python
 ("sum",    ["a", "b"],      "a+b"),
@@ -331,8 +333,8 @@ Covers the lexer, parser, classical interpreter, function defs, and the multi-st
 
 ## Extending the language
 
-1. **Add a method**: append to `FUNC_TEMPLATES` in `data_generator.py` with a short arithmetic body.
-2. **Add a syntactic style**: extend the surface-form generator in `data_generator.py` so the pair `(new_style, canonical_ast)` shows up in training.
+1. **Add a method**: append to `FUNC_TEMPLATES` in `templates.py` with a short arithmetic body.
+2. **Add a syntactic style**: extend the program generator in `data_generator.py` so the pair `(new_style, canonical_ast)` shows up in training. `python -m interpreter.generator_report` shows interpreter code and AST features the generated programs never reach.
 3. **Retrain**: `python -m interpreter.train_pipeline`.
 4. **Use it**: the REPL will now understand the new form.
 

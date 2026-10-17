@@ -208,8 +208,8 @@ class CrossAttentionTransformer(nn.Module):
                 x_window = x_out[:, -BLOCK_SIZE:]
                 logits, loss = self(x_out=x_window, x_in=x_in)
                 logits = logits[:, -1, :]  # last element in T dim (B, C)
-                probs = F.softmax(logits, dim=-1)
-                x_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
+                # Greedy: the most likely token, so the same input always compiles to the same AST.
+                x_next = torch.argmax(logits, dim=-1, keepdim=True)  # (B, 1)
                 x_out = torch.cat((x_out, x_next), dim=1)  # (B, T+1)
                 if x_next.item() == TOKEN_IDS[EOF]:
                     break
@@ -217,9 +217,29 @@ class CrossAttentionTransformer(nn.Module):
         return x_out
 
     @staticmethod
+    def count_parens_outside_strings(text):
+        """(opening, closing) parentheses, skipping those inside "..." string literals."""
+        count_lparen = count_rparen = 0
+        in_string = escaped = False
+        for char in text:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == '\\':
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+            elif char == '"':
+                in_string = True
+            elif char == '(':
+                count_lparen += 1
+            elif char == ')':
+                count_rparen += 1
+        return count_lparen, count_rparen
+
+    @staticmethod
     def fix_unmatched_parenthesis(text):
-        count_lparen = text.count('(')
-        count_rparen = text.count(')')
+        count_lparen, count_rparen = CrossAttentionTransformer.count_parens_outside_strings(text)
         if count_lparen > count_rparen:  # balance on right
             text = text.strip() + ')' * (count_lparen - count_rparen)
         elif count_lparen < count_rparen:  # balance on left

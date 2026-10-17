@@ -1,7 +1,7 @@
 ########################
 # IMPORTS
 ########################
-import re
+import json
 import math
 import torch
 import string
@@ -100,6 +100,12 @@ class RTError(Error):
         result += f'\n\n{string_with_arrows(self.pos_start.ftxt, self.pos_start, self.pos_end)}'
         return result
 
+class StepLimitError(RTError):
+    """The program ran past its `Interpreter(max_steps=...)` budget, e.g. a loop that never ends."""
+    def __init__(self, pos_start, pos_end, max_steps, context):
+        super().__init__(pos_start, pos_end, f'Stopped after {max_steps} steps', context)
+        self.error_name = 'Step limit exceeded'
+
 ########################
 # POSITION
 ########################
@@ -147,6 +153,9 @@ class Token:
         return self.type == type_ and self.value == value
 
     def __repr__(self):
+        # Strings are JSON-quoted, so spaces and brackets inside one can't pass for token boundaries
+        # in the lexer stream the model reads (or in the AST text it writes).
+        if self.type == STRING: return f'{self.type}:{json.dumps(self.value, ensure_ascii=False)}'
         if self.value is not None: return f'{self.type}:{self.value}'
         return f'{self.type}'
 
@@ -366,19 +375,33 @@ class StringNode:
 
 
 class ListNode:
+    """A list literal `[a, b]`"""
+
     def __init__(self, element_nodes, pos_start, pos_end):
         self.element_nodes = element_nodes
         self.pos_start = pos_start
         self.pos_end = pos_end
 
     def __repr__(self):
-        # A lone statement renders as itself, so single-statement AST text is unchanged
-        # by `statements` becoming the parse entry point. Several are NEWLINE-separated,
-        # which `get_tree_from_string` splits on before its arity dispatch.
-        if len(self.element_nodes) == 1:
-            return f'{self.element_nodes[0]}'
+        return f'[{" ".join(str(node) for node in self.element_nodes)}]'
+
+
+class BlockNode:
+    """A run of statements: a whole program, or the body of a block if/for/while/def."""
+
+    def __init__(self, statement_nodes, pos_start, pos_end):
+        self.statement_nodes = statement_nodes
+        self.pos_start = pos_start
+        self.pos_end = pos_end
+
+    def __repr__(self):
+        """A lone statement renders as itself, so single-statement AST text is unchanged by
+        `statements` becoming the parse entry point. Several are NEWLINE-separated, which
+        `AstTextReader` splits on before its arity dispatch."""
+        if len(self.statement_nodes) == 1:
+            return f'{self.statement_nodes[0]}'
         separator = f' {NEWLINE} '
-        return f'({separator.join(str(node) for node in self.element_nodes)})'
+        return f'({separator.join(str(node) for node in self.statement_nodes)})'
 
 
 class VarAccessNode:
@@ -427,6 +450,16 @@ class UnaryOpNode:
         return f'({self.op_tok} {self.node})'
 
 
+def body_repr(body_node, is_block):
+    """Render an if/for/while/def body. A block body is always `(NEWLINE s1 NEWLINE s2)`,
+    even with one statement, so the text keeps the block-vs-inline distinction that decides
+    whether the construct evaluates to its value or to null."""
+    if not is_block:
+        return f'{body_node}'
+    statements = body_node.statement_nodes if isinstance(body_node, BlockNode) else [body_node]
+    return f'({" ".join(f"{NEWLINE} {node}" for node in statements)})'
+
+
 class IfNode:
     def __init__(self, cases, else_case):
         self.cases = cases
@@ -435,35 +468,56 @@ class IfNode:
         self.pos_start = self.cases[0][0].pos_start
         self.pos_end = (self.else_case or self.cases[len(self.cases)-1])[0].pos_end
 
+    def __repr__(self):
+        """(if cond body cond body else_body): an odd trailing body is the else."""
+        parts = [IF]
+        for condition, body, is_block in self.cases:
+            parts += [f'{condition}', body_repr(body, is_block)]
+        if self.else_case:
+            body, is_block = self.else_case
+            parts.append(body_repr(body, is_block))
+        return f'({" ".join(parts)})'
+
 
 class ForNode:
-    def __init__(self, var_name_tok, start_value_node, end_value_node, step_value_node, body_node, should_return_null):
+    def __init__(self, var_name_tok, start_value_node, end_value_node, step_value_node, body_node, is_block):
         self.var_name_tok = var_name_tok
         self.start_value_node = start_value_node
         self.end_value_node = end_value_node
         self.step_value_node = step_value_node
         self.body_node = body_node
-        self.should_return_null = should_return_null
+        self.is_block = is_block
 
         self.pos_start = self.var_name_tok.pos_start
         self.pos_end = self.body_node.pos_end
 
+    def __repr__(self):
+        """(for var start end [step] body): the step is present iff there are five children."""
+        parts = [FOR, f'{self.var_name_tok}', f'{self.start_value_node}', f'{self.end_value_node}']
+        if self.step_value_node:
+            parts.append(f'{self.step_value_node}')
+        parts.append(body_repr(self.body_node, self.is_block))
+        return f'({" ".join(parts)})'
+
 
 class WhileNode:
-    def __init__(self, condition_node, body_node, should_return_null):
+    def __init__(self, condition_node, body_node, is_block):
         self.condition_node = condition_node
         self.body_node = body_node
-        self.should_return_null = should_return_null
+        self.is_block = is_block
 
         self.pos_start = self.condition_node.pos_start
         self.pos_end = self.body_node.pos_end
 
+    def __repr__(self):
+        return f'({WHILE} {self.condition_node} {body_repr(self.body_node, self.is_block)})'
+
 class FuncDefNode:
-    def __init__(self, var_name_tok, arg_name_toks, body_node, should_auto_return):
+    def __init__(self, var_name_tok, arg_name_toks, body_node, is_block):
         self.var_name_tok = var_name_tok
         self.arg_name_toks = arg_name_toks
         self.body_node = body_node
-        self.should_auto_return = should_auto_return
+        self.is_block = is_block
 
         if self.var_name_tok:
             self.pos_start = self.var_name_tok.pos_start
@@ -477,7 +531,7 @@ class FuncDefNode:
     def __repr__(self):
         args = ' '.join(str(t) for t in self.arg_name_toks)
         name = self.var_name_tok if self.var_name_tok else ''
-        return f'({FUN} {name}({args}) -> {self.body_node})'
+        return f'({FUN} {name}({args}) -> {body_repr(self.body_node, self.is_block)})'
 
 
 class CallNode:
@@ -503,17 +557,244 @@ class ReturnNode:
         self.pos_start = pos_start
         self.pos_end = pos_end
 
+    def __repr__(self):
+        if self.node_to_return:
+            return f'({RETURN} {self.node_to_return})'
+        return RETURN
+
 
 class ContinueNode:
     def __init__(self, pos_start, pos_end):
         self.pos_start = pos_start
         self.pos_end = pos_end
 
+    def __repr__(self):
+        return CONTINUE
+
 
 class BreakNode:
     def __init__(self, pos_start, pos_end):
         self.pos_start = pos_start
         self.pos_end = pos_end
+
+    def __repr__(self):
+        return BREAK
+
+
+########################
+# AST TEXT
+########################
+
+class AstTextReader:
+    """Rebuild AST nodes from AST text: the s-expression the node `__repr__`s write and the model
+    learns to emit. Stateless, every method is a pure function; the class only groups them.
+
+    A group's meaning comes from its head keyword or, without one, from its arity:
+    - int:3  float:2.5  string:"a b"           -> NumberNode / StringNode (string is JSON-quoted)
+    - IDENTIFIER:x  IDENTIFIER:x:<node>         -> VarAccessNode / VarAssignNode
+    - (op node)  (left op right)                -> UnaryOpNode / BinOpNode
+    - <node>(arg arg)                           -> CallNode: the args are glued to the callee
+    - [a b]                                     -> ListNode
+    - (a NEWLINE b)                             -> BlockNode
+    - (NEWLINE a NEWLINE b)                     -> a block body: its if/for/while/def is block-bodied
+    - (if cond body cond body [else_body])      -> IfNode: cond/body pairs, an odd last body is the else
+    - (for IDENTIFIER:i start end [step] body)  -> ForNode
+    - (while cond body)                         -> WhileNode
+    - (def IDENTIFIER:f(IDENTIFIER:a) -> body)  -> FuncDefNode; anonymous is `(def (IDENTIFIER:a) -> body)`
+    - (return node)  return  continue  break    -> ReturnNode / ContinueNode / BreakNode
+
+    Reading happens in two passes. `read_item` turns text into nested tuples ('atom', text),
+    ('assign', name, item), ('call', callee, args), ('square', items) and ('group', items), each
+    step taking a position in the text and returning the position after what it read. `build`
+    then turns those tuples into nodes.
+    """
+
+    @staticmethod
+    def get_tree_from_string(text):
+        """The AST `text` describes: the inverse of the node `__repr__`s. Raises ValueError on
+        malformed text."""
+        text = text.strip()
+        try:
+            item, end = AstTextReader.read_item(text, 0)
+            end = AstTextReader.skip_spaces(text, end)
+            if end != len(text):
+                raise ValueError(f'Unexpected text after the AST: {text[end:]}')
+            return AstTextReader.build(item)
+        except ValueError as error:
+            raise ValueError(f'{error} in: {text}') from None
+
+    # Pass 1: text -> items
+
+    @staticmethod
+    def skip_spaces(text, i):
+        while text.startswith(' ', i):
+            i += 1
+        return i
+
+    @staticmethod
+    def read_item(text, i):
+        i = AstTextReader.skip_spaces(text, i)
+        if text.startswith('(', i):
+            items, i = AstTextReader.read_seq(text, i, ')')
+            item = ('group', items)
+        elif text.startswith('[', i):
+            items, i = AstTextReader.read_seq(text, i, ']')
+            item = ('square', items)
+        else:
+            item, i = AstTextReader.read_atom(text, i)
+        while text.startswith('(', i):  # A glued `(` opens call args; after a space it would be the next child.
+            args, i = AstTextReader.read_seq(text, i, ')')
+            item = ('call', item, args)
+        return item, i
+
+    @staticmethod
+    def read_seq(text, i, close):
+        """The items between the bracket at `i` and its `close`."""
+        i += 1
+        items = []
+        while True:
+            i = AstTextReader.skip_spaces(text, i)
+            if text.startswith(close, i):
+                return items, i + 1
+            if i >= len(text):
+                raise ValueError(f"Expected '{close}'")
+            item, i = AstTextReader.read_item(text, i)
+            items.append(item)
+
+    @staticmethod
+    def read_atom(text, i):
+        start = i
+        if text.startswith(f'{IDENTIFIER}:', i):
+            i += len(IDENTIFIER) + 1
+            while i < len(text) and text[i] in LETTERS_DIGITS:
+                i += 1
+            name = text[start:i]
+            if text.startswith(':', i):  # IDENTIFIER:x:<value> is an assignment.
+                value, i = AstTextReader.read_item(text, i + 1)
+                return ('assign', name, value), i
+            return ('atom', name), i
+
+        if text.startswith(f'{STRING}:"', i):
+            _, i = json.JSONDecoder().raw_decode(text, i + len(STRING) + 1)
+            return ('atom', text[start:i]), i
+
+        while i < len(text) and text[i] not in ' ()[]':
+            i += 1
+        if i == start:
+            raise ValueError(f"Unexpected '{text[start:start + 1]}' at {start}")
+        return ('atom', text[start:i]), i
+
+    # Pass 2: items -> nodes
+
+    @staticmethod
+    def dummy_pos():
+        return Position(0, 0, 0, '<string>', '')
+
+    @staticmethod
+    def token(text):
+        type_, has_value, value = text.partition(':')
+        if not has_value:
+            return Token(type_, pos_start=AstTextReader.dummy_pos())
+        if type_ == STRING:
+            value = json.loads(value)
+        elif type_ not in (IDENTIFIER, KEYWORD):  # Names like `inf` must not become floats.
+            for cast in (int, float):
+                try:
+                    value = cast(value)
+                    break
+                except ValueError:
+                    pass
+        return Token(type_, value, pos_start=AstTextReader.dummy_pos())
+
+    @staticmethod
+    def is_block(item):
+        return item[0] == 'group' and item[1][:1] == [('atom', NEWLINE)]
+
+    @staticmethod
+    def build(item):
+        kind = item[0]
+        if kind == 'atom':
+            return AstTextReader.build_atom(item[1])
+        if kind == 'assign':
+            return VarAssignNode(AstTextReader.token(item[1]), AstTextReader.build(item[2]))
+        if kind == 'call':
+            return CallNode(AstTextReader.build(item[1]), [AstTextReader.build(arg) for arg in item[2]])
+        if kind == 'square':
+            return ListNode([AstTextReader.build(e) for e in item[1]], AstTextReader.dummy_pos(), AstTextReader.dummy_pos())
+        return AstTextReader.build_group(item[1])
+
+    @staticmethod
+    def build_atom(text):
+        pos = AstTextReader.dummy_pos()
+        if text == RETURN:
+            return ReturnNode(None, pos, pos)
+        if text == CONTINUE:
+            return ContinueNode(pos, pos)
+        if text == BREAK:
+            return BreakNode(pos, pos)
+        tok = AstTextReader.token(text)
+        if tok.type == IDENTIFIER:
+            return VarAccessNode(tok)
+        if tok.type == STRING:
+            return StringNode(tok)
+        return NumberNode(tok)
+
+    @staticmethod
+    def build_group(items):
+        build, is_block, token = AstTextReader.build, AstTextReader.is_block, AstTextReader.token
+        if not items:
+            raise ValueError('Empty group')
+        head = items[0][1] if items[0][0] == 'atom' else None
+        rest = items[1:]
+
+        # Statements and block bodies. Must come before the arity checks below,
+        # or a two-statement block is indistinguishable from a BinOpNode.
+        if ('atom', NEWLINE) in items:
+            statement_nodes = [build(item) for item in items if item != ('atom', NEWLINE)]
+            return BlockNode(statement_nodes, AstTextReader.dummy_pos(), AstTextReader.dummy_pos())
+
+        if head == IF and len(rest) >= 2:
+            cases = [(build(condition), build(body), is_block(body))
+                     for condition, body in zip(rest[0::2], rest[1::2])]
+            else_case = (build(rest[-1]), is_block(rest[-1])) if len(rest) % 2 else None
+            return IfNode(cases, else_case)
+        if head == FOR and len(rest) in (4, 5) and rest[0][0] == 'atom':
+            var_item, start, end, *step, body = rest
+            return ForNode(var_name_tok=token(var_item[1]),
+                           start_value_node=build(start),
+                           end_value_node=build(end),
+                           step_value_node=build(step[0]) if step else None,
+                           body_node=build(body),
+                           is_block=is_block(body))
+        if head == WHILE and len(rest) == 2:
+            condition, body = rest
+            return WhileNode(build(condition), build(body), is_block(body))
+        if head == FUN and len(rest) == 3 and rest[1] == ('atom', '->'):
+            return AstTextReader.build_func_def(rest[0], rest[2])
+        if head == RETURN and len(rest) == 1:
+            return ReturnNode(build(rest[0]), AstTextReader.dummy_pos(), AstTextReader.dummy_pos())
+
+        if len(items) == 1:
+            return build(items[0])
+        if len(items) == 2 and head is not None:
+            return UnaryOpNode(token(head), build(items[1]))
+        if len(items) == 3 and items[1][0] == 'atom':
+            return BinOpNode(build(items[0]), token(items[1][1]), build(items[2]))
+        raise ValueError(f'Unexpected group of {len(items)} items')
+
+    @staticmethod
+    def build_func_def(signature, body):
+        token = AstTextReader.token
+        if signature[0] == 'call' and signature[1][0] == 'atom':  # def IDENTIFIER:f(args)
+            var_name_tok, arg_items = token(signature[1][1]), signature[2]
+        elif signature[0] == 'group':  # def (args)
+            var_name_tok, arg_items = None, signature[1]
+        else:
+            raise ValueError('Unexpected function signature')
+        if any(arg[0] != 'atom' for arg in arg_items):
+            raise ValueError('Function parameters must be identifiers')
+        arg_name_toks = [token(arg[1]) for arg in arg_items]
+        return FuncDefNode(var_name_tok, arg_name_toks, AstTextReader.build(body), AstTextReader.is_block(body))
 
 
 ########################
@@ -573,143 +854,6 @@ class Parser:
     def update_current_tok(self):
         if self.tok_idx >= 0 and self.tok_idx < len(self.token_list):
             self.current_tok = self.token_list[self.tok_idx]
-
-    @staticmethod
-    def get_tree_from_string(text):
-        """
-        Parse a tree string representation and rebuild AST nodes recursively.
-        Format examples:
-        - (INT:2 MUL INT:2) -> BinOpNode
-        - (MINUS INT:5) -> UnaryOpNode
-        - INT:3 -> NumberNode
-        - IDENTIFIER:x -> VarAccessNode (variable retrieval)
-        - IDENTIFIER:x:INT:5 -> VarAssignNode (assignment; value can be any expr string)
-        - IDENTIFIER:x:(INT:2 ADD INT:3) -> VarAssignNode with expr value
-        """
-
-        text = text.strip()
-        
-        # Helper function to parse a token string (e.g., "INT:2" or "MUL")
-        def parse_token(token_str):
-            token_str = token_str.strip()
-            # Create a dummy position for token_list
-            dummy_pos = Position(0, 0, 0, '<string>', '')
-            if ':' in token_str:
-                parts = token_str.split(':', 1)
-                token_type = parts[0]
-                # Try to parse value as int, float, or keep as string
-                value_str = parts[1]
-                try:
-                    if '.' in value_str:
-                        value = float(value_str)
-                    else:
-                        value = int(value_str)
-                except ValueError:
-                    value = value_str
-                # Create a token with dummy position
-                return Token(token_type, value, pos_start=dummy_pos)
-            else:
-                return Token(token_str, pos_start=dummy_pos)
-        
-        # Helper function to find matching closing parenthesis
-        def find_matching_paren(text, start_idx):
-            depth = 0
-            for i in range(start_idx, len(text)):
-                if text[i] == '(':
-                    depth += 1
-                elif text[i] == ')':
-                    depth -= 1
-                    if depth == 0:
-                        return i
-            return -1
-        
-        # Try to parse as a simple token or identifier (no parentheses)
-        if not text.startswith('('):
-            # Variable: IDENTIFIER:name (access) or IDENTIFIER:name:expr (assignment)
-            if text.startswith('IDENTIFIER:'):
-                parts = text.split(':', 2)  # at most 3 parts so value can contain colons
-                if len(parts) == 2:
-                    # VarAccessNode: IDENTIFIER:name_var
-                    tok = parse_token(f"IDENTIFIER:{parts[1]}")
-                    return VarAccessNode(tok)
-                elif len(parts) == 3:
-                    # VarAssignNode: IDENTIFIER:name_var:value (value is expr string)
-                    tok = parse_token(f"IDENTIFIER:{parts[1]}")
-                    value_node = Parser.get_tree_from_string(parts[2].strip())
-                    return VarAssignNode(tok, value_node)
-                else:
-                    raise ValueError(f"Invalid IDENTIFIER format: {text}")
-            # Number or other token (e.g. "INT:2", "FLOAT:3.14", "MUL")
-            if re.match(r'^[A-Z_]+(:.+)?$', text):
-                tok = parse_token(text)
-                return NumberNode(tok)
-            else:
-                tok = parse_token(text)
-                return NumberNode(tok)
-        
-        # Parse as BinOpNode or UnaryOpNode (both start with '(')
-        # Extract content inside the outermost parentheses
-        end_idx = find_matching_paren(text, 0)
-        if end_idx == -1:
-            raise ValueError(f"Unmatched parenthesis in: {text}")
-        
-        content = text[1:end_idx].strip()
-        
-        # Split content by spaces, but preserve parentheses groups
-        token_list = []
-        current_token = ""
-        paren_depth = 0
-        
-        i = 0
-        while i < len(content):
-            char = content[i]
-            if char == '(':
-                if paren_depth == 0 and current_token.strip():
-                    token_list.append(current_token.strip())
-                    current_token = ""
-                current_token += char
-                paren_depth += 1
-            elif char == ')':
-                current_token += char
-                paren_depth -= 1
-                if paren_depth == 0:
-                    token_list.append(current_token.strip())
-                    current_token = ""
-            elif char == ' ' and paren_depth == 0:
-                if current_token.strip():
-                    token_list.append(current_token.strip())
-                    current_token = ""
-            else:
-                current_token += char
-            i += 1
-        
-        if current_token.strip():
-            token_list.append(current_token.strip())
-        
-        token_list = [t for t in token_list if t]  # Remove empty token_list
-
-        # Statements: (stmt NEWLINE stmt ...). Must come before the arity checks below,
-        # or a two-statement list is indistinguishable from a BinOpNode.
-        if NEWLINE in token_list:
-            dummy_pos = Position(0, 0, 0, '<string>', '')
-            element_nodes = [Parser.get_tree_from_string(t) for t in token_list if t != NEWLINE]
-            return ListNode(element_nodes, dummy_pos, dummy_pos)
-
-        if len(token_list) == 1:
-            return Parser.get_tree_from_string(token_list[0])
-        elif len(token_list) == 2:
-            # UnaryOpNode: (op node)
-            op_tok = parse_token(token_list[0])
-            node = Parser.get_tree_from_string(token_list[1])
-            return UnaryOpNode(op_tok, node)
-        elif len(token_list) == 3:
-            # BinOpNode: (left op right)
-            left = Parser.get_tree_from_string(token_list[0])
-            op_tok = parse_token(token_list[1])
-            right = Parser.get_tree_from_string(token_list[2])
-            return BinOpNode(left, op_tok, right)
-        else:
-            raise ValueError(f"Unexpected number of tokens: {len(token_list)} in: {content}")
 
     def parse(self):
         if self.current_tok.type == SOF:
@@ -1034,7 +1178,7 @@ class Parser:
                                        end_value_node=end_value,
                                        step_value_node=step_value,
                                        body_node=body,
-                                       should_return_null=True))
+                                       is_block=True))
 
         body = res.register(self.statement())
         if res.error: return res
@@ -1043,7 +1187,7 @@ class Parser:
                 end_value_node=end_value,
                 step_value_node=step_value,
                 body_node=body,
-                should_return_null=False))
+                is_block=False))
 
     def while_expr(self):
         res = ParseResult()
@@ -1168,14 +1312,14 @@ class Parser:
                 ))
             res.register_advance()
             self.advance()
-            return res.success(FuncDefNode(var_name_tok, arg_name_toks, body, False))
+            return res.success(FuncDefNode(var_name_tok, arg_name_toks, body, is_block=True))
         elif self.current_tok.type == ARROW:
             res.register_advance()
             self.advance()
 
             body = res.register(self.expr())
             if res.error: return res
-            return res.success(FuncDefNode(var_name_tok, arg_name_toks, body, True))
+            return res.success(FuncDefNode(var_name_tok, arg_name_toks, body, is_block=False))
         else:
             return res.failure(InvalidSyntaxError(
                 self.current_tok.pos_start, self.current_tok.pos_end,
@@ -1336,7 +1480,7 @@ class Parser:
                 continue
             statements.append(statement)
 
-        return res.success(ListNode(
+        return res.success(BlockNode(
             statements,
             pos_start,
             self.current_tok.pos_end.copy(),
@@ -1509,8 +1653,10 @@ class Value:
     def notted(self):
         return None, self.illegal_operation()
 
-    def execute(self, args):
-        return None, self.illegal_operation()
+    def execute(self, args, interpreter=None) -> RTResult:
+        """Calling a non-function is illegal. `interpreter` is unused here: every call passes
+        it, for `Function.execute` to share the caller's step budget."""
+        return RTResult().failure(self.illegal_operation())
 
     def copy(self):
         raise Exception('No copy method defined')
@@ -1712,9 +1858,11 @@ class Function(BaseFunction):
         self.arg_names = arg_names
         self.should_auto_return = should_auto_return
 
-    def execute(self, args):
+    def execute(self, args, interpreter=None) -> RTResult:
+        """`interpreter` is the caller's, so the body shares its step budget."""
         res = RTResult()
-        interpreter = Interpreter()
+        if interpreter is None:
+            interpreter = Interpreter()
         exec_ctx = self.generate_new_context()
         res.register(self.check_and_populate_args(self.arg_names, args, exec_ctx))
         if res.should_return(): return res
@@ -1742,7 +1890,9 @@ class BuiltInFunction(BaseFunction):
     def __init__(self, name):
         super().__init__(name)
 
-    def execute(self, args):
+    def execute(self, args, interpreter=None) -> RTResult:
+        """`interpreter` is unused: built-ins run no AST, so there are no steps to count. Every
+        call passes it, for `Function.execute` to share the caller's step budget."""
         res = RTResult()
         exec_ctx = self.generate_new_context()
 
@@ -1943,24 +2093,28 @@ class List(Value):
     def __repr__(self):
         return f'[{', '.join([repr(e) for e in self.elements])}]'
 
+    def copy_list_with_elements(self, elements):
+        """A new List holding `elements`, with this list's position and context.
+
+        The operators (`l + x`, `l * m`, `l - i`) build their result with this so `l` itself
+        stays unchanged. They can't use `copy`: reading a variable returns a `copy` that shares
+        the same Python list on purpose, so that `append(l, x)` changes the variable `l`."""
+        return List(elements).set_pos(self.pos_start, self.pos_end).set_context(self.context)
+
     def add_to(self, other):
-        new_list = self.copy()
-        new_list.elements.append(other)
-        return new_list, None
+        return self.copy_list_with_elements(self.elements + [other]), None
 
     def mul_by(self, other):
         if not isinstance(other, List):
             return None, Value.illegal_operation(self, other)
 
-        new_list = self.copy()
-        new_list.elements.extend(other.elements)
-        return new_list, None
+        return self.copy_list_with_elements(self.elements + other.elements), None
 
     def sub_by(self, other):
         if not isinstance(other, Number):
             return None, Value.illegal_operation(self, other)
 
-        new_list = self.copy()
+        new_list = self.copy_list_with_elements(list(self.elements))
         try:
             new_list.elements.pop(other.value)
             return new_list, None
@@ -2050,7 +2204,17 @@ class Interpreter:
     ``op(a, b)`` — both resolve the name and apply :meth:`Function.execute` to the operands.
     """
 
+    def __init__(self, max_steps=None):
+        # Node visits allowed before failing with StepLimitError; None means unlimited.
+        # Function bodies run on the caller's Interpreter, so they count towards the same budget.
+        self.max_steps = max_steps
+        self.steps = 0
+
     def visit(self, node, context):
+        self.steps += 1
+        if self.max_steps is not None and self.steps > self.max_steps:
+            return RTResult().failure(StepLimitError(node.pos_start, node.pos_end, self.max_steps, context))
+
         method_name = f'visit_{type(node).__name__}'
         method = getattr(self, method_name, self.no_visit_method)
         return method(node, context)
@@ -2104,7 +2268,7 @@ class Interpreter:
             name = node.op_tok.value
             fn = context.symbol_table.get(name)
             if isinstance(fn, Function):
-                return fn.execute([left, right])
+                return fn.execute([left, right], interpreter=self)
             return res.failure(RTError(
                 node.op_tok.pos_start, node.op_tok.pos_end,
                 f'"{name}" is not defined',
@@ -2176,23 +2340,37 @@ class Interpreter:
             List(element_values).set_context(context).set_pos(node.pos_start, node.pos_end)
         )
 
+    def visit_BlockNode(self, node, context):
+        """Runs the statements in order. Evaluates to a List of their values, which the shell
+        prints and an inline-bodied loop collects."""
+        res = RTResult()
+        statement_values = []
+
+        for statement_node in node.statement_nodes:
+            statement_values.append(res.register(self.visit(statement_node, context)))
+            if res.should_return(): return res
+
+        return res.success(
+            List(statement_values).set_context(context).set_pos(node.pos_start, node.pos_end)
+        )
+
     def visit_IfNode(self, node, context):
         res = RTResult()
 
-        for condition, expr, should_return_null in node.cases:
+        for condition, expr, is_block in node.cases:
             condition_value = res.register(self.visit(condition, context))
             if res.should_return(): return res
 
             if condition_value.is_true():
                 expr_value = res.register(self.visit(expr, context))
                 if res.should_return(): return res
-                return res.success(Number.null if should_return_null else expr_value)
+                return res.success(Number.null if is_block else expr_value)
 
         if node.else_case:
-            expr, should_return_null = node.else_case
+            expr, is_block = node.else_case
             else_value = res.register(self.visit(expr, context))
             if res.should_return(): return res
-            return res.success(Number.null if should_return_null else else_value)
+            return res.success(Number.null if is_block else else_value)
 
         return res.success(Number.null)
 
@@ -2237,7 +2415,7 @@ class Interpreter:
 
             elements.append(value)
 
-        if node.should_return_null:
+        if node.is_block:
             return res.success(Number.null)
 
         return res.success(
@@ -2268,7 +2446,7 @@ class Interpreter:
 
             elements.append(value)
 
-        if node.should_return_null:
+        if node.is_block:
             return res.success(Number.null)
 
         return res.success(
@@ -2281,7 +2459,8 @@ class Interpreter:
         func_name = node.var_name_tok.value if node.var_name_tok else None
         body_node = node.body_node
         arg_names = [arg_name.value for arg_name in node.arg_name_toks]
-        func_value = Function(func_name, body_node, arg_names, node.should_auto_return).set_context(context).set_pos()
+        # Arrow bodies return their value; block bodies only return through `return`.
+        func_value = Function(func_name, body_node, arg_names, not node.is_block).set_context(context).set_pos()
 
         if node.var_name_tok:
             context.symbol_table.set(func_name, func_value)
@@ -2301,7 +2480,7 @@ class Interpreter:
             if res.should_return(): return res
 
 
-        return_value = res.register(value_to_call.execute(args))
+        return_value = res.register(value_to_call.execute(args, interpreter=self))
         if res.should_return(): return res
         return_value = return_value.copy().set_pos(node.pos_start, node.pos_end).set_context(context)
         return res.success(return_value)
@@ -2397,14 +2576,14 @@ def inference(token_list):
     predicted_ast_text = model.inference(lex_encoded, ast_merges)
 
     try:
-        ast_node = Parser.get_tree_from_string(predicted_ast_text)
+        ast_node = AstTextReader.get_tree_from_string(predicted_ast_text)
     except Exception:
         # If we cannot rebuild the tree, fall back to the standard parser
         parser = Parser(token_list)
         ast = parser.parse()
         return ast.node
 
-    return ListNode([ast_node], ast_node.pos_start, ast_node.pos_end)
+    return BlockNode([ast_node], ast_node.pos_start, ast_node.pos_end)
 
 
 def run_interpreter(symbol_table, ast_node):

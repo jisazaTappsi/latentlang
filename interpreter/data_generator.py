@@ -1,393 +1,53 @@
-import re
-import math
+"""Training data: random valid programs over the whole language, as (lexer text, AST text) samples.
+
+Programs are built per value type from the operations the interpreter accepts for that type
+(the `Value` classes in basic.py), so type errors, undefined names, wrong call arities and a
+`break`/`continue`/`return` outside its loop or function are never generated. What types can't
+rule out (division by zero, list indexes, loops that don't end) is handled by running each
+candidate statement for real, after the statements before it, under the MAX_INTERPRETER_STEPS
+budget: it is kept only if it runs cleanly and fits BLOCK_SIZE, otherwise another is drawn.
+
+The generator emits source text, and a sample's AST comes from parsing that text, so the two
+sides of a sample can never disagree. Template calls are inlined in the AST, so the model learns
+to emit only primitive operations.
+
+Write the dataset with: python -m interpreter.data_generator
+"""
 import copy
+import functools
+import math
 import random
-import pandas as pd
+from collections import Counter, namedtuple
 from typing import Optional
 
+import pandas as pd
 
 from . import data
 from . import basic
 from . import tokens
-from .util import *
+from .templates import FUNC_TEMPLATES
+from .util import BLOCK_SIZE, DATASET_NAME, MAX_INTERPRETER_STEPS, NUM_TRAINING_SAMPLES
 
 
-def log_scale_int(low: int, high: int, base: float = math.e) -> int:
-    """Sample an integer in [low, high] with log scale so smaller numbers are overrepresented.
-    low must be >= 1 (use separate logic to include 0)."""
-    if low >= high:
-        return low
-    # u uniform in [0,1] -> value log-uniform in [low, high], then round
-    u = random.random()
-    log_val = math.log(low, base) + u * (math.log(high, base) - math.log(low, base))
-    return min(high, max(low, int(round(math.exp(log_val)))))
-
-
-def int_part():
-    return 0 if random.random() < 0.1 else log_scale_int(1, 2**31, base=6)
-
-
-def generate_number():
-    """Generate a random integer or float (log scale: smaller numbers more likely)."""
-    # Include 0 with small probability; otherwise log-scale in [1, 9999]
-    if random.random() < 0.3:  # 30% chance of float
-        integer_part = int_part()
-        decimal_part = random.randint(0, 99)  # 2 digits id drawn from uniform distribution
-        return f"{integer_part}.{decimal_part:02d}"
-    else:
-        return str(int_part())
-
-
-def generate_factor(depth=0, max_depth=5, allowed_vars=None):
-    """
-    Generate a factor according to grammar:
-    factor : INT|FLOAT|IDENTIFIER
-          : (PLUS|MINUS) factor
-          : LPAREN expr RPAREN
-    """
-    if depth >= max_depth:
-        # At max depth, only generate numbers (or variable if allowed) to avoid infinite recursion
-        if allowed_vars and random.random() < 0.3:
-            return random.choice(allowed_vars)
-        return generate_number()
-    
-    choice = random.random()
-    
-    if allowed_vars and choice < 0.25:  # 25% chance: use a declared variable
-        return random.choice(allowed_vars)
-    elif choice < 0.5:  # number (or variable if not using vars)
-        if allowed_vars and random.random() < 0.4:
-            return random.choice(allowed_vars)
-        return generate_number()
-    elif choice < 0.75:  # unary operator
-        op = random.choice(['+', '-'])
-        factor = generate_factor(depth + 1, max_depth, allowed_vars)
-        return f"{op}{factor}"
-    else:  # parentheses
-        expr = generate_expr(depth + 1, max_depth, allowed_vars)
-        return f"({expr})"
-
-
-def generate_call(depth, max_depth, allowed_vars):
-    """call       : factor (LPAREN (expr (COMMA expr)*)? RPAREN)?
-    Functions: name(args). Learned *operators*: infix between calls, e.g. 8 times 9 (template-defined; not builtins)."""
-    # Keep recursion bounded: at max depth emit only a simple factor.
-    if depth >= max_depth:
-        return generate_factor(depth, max_depth, allowed_vars)
-
-    choice = random.random()
-    if choice < 0.33:
-        return generate_factor(depth, max_depth, allowed_vars)
-    elif choice < 0.66:
-        name, params, _ = random.choice(FUNC_TEMPLATES)
-        args = [generate_expr(depth + 1, max_depth, allowed_vars) for _ in params]
-        return f"{name}({','.join(args)})"
-    else:
-        name, params, _ = random.choice([f for f in FUNC_TEMPLATES if len(f[1]) == 2])
-        left = generate_call(depth + 1, max_depth, allowed_vars)
-        right = generate_call(depth + 1, max_depth, allowed_vars)
-        if name == "over":
-            while True:
-                try:
-                    test = right.replace(tokens.NULL, '0')
-                    if int(eval(test)) != 0:
-                        break
-                except Exception:
-                    break
-                right = generate_call(depth + 1, max_depth, allowed_vars)
-        return f"{left} {name} {right}"
-
-
-def generate_term(depth=0, max_depth=5, allowed_vars=None):
-    """
-    Generate a term according to grammar:
-    term : factor ((MUL|DIV) factor)*
-    """
-    if depth >= max_depth:
-        return generate_call(depth, max_depth, allowed_vars)
-
-    result = generate_call(depth, max_depth, allowed_vars)
-    
-    # Randomly add more factors with MUL or DIV operators (often 0 to keep equations small)
-    num_ops = 1 if random.random() < 0.3 else 0
-    for _ in range(num_ops):
-
-        # Desperate attempt at trying to decrease the division by zeroes...
-        op = random.choices(['*', '/'], weights=[0.95, 0.05], k=1)[0]
-
-        while True:  # Don't allow division by zero
-            factor = generate_call(depth, max_depth, allowed_vars)
-            try:
-                factor = factor.replace(tokens.NULL, '0')  # in our interpreter None is a 0
-                mini_expr = int(eval(factor))
-                if op != '/' or mini_expr != 0:
-                    break
-            except:
-                break
-
-        result = f"{result}{op}{factor}"
-    
-    return result
-
-
-def generate_expr(depth=0, max_depth=5, allowed_vars=None):
-    """
-    Generate an expression according to grammar:
-    expr : (term(PLUS|MINUS) term)*
-    """
-    if allowed_vars is None:
-        allowed_vars = []
-    if depth >= max_depth:  # At max depth, generate a simple term
-        return generate_term(depth, max_depth, allowed_vars)
-    
-    result = generate_term(depth, max_depth, allowed_vars)
-    
-    # Randomly add more terms with PLUS or MINUS operators (often 0 to keep equations small)
-    num_ops = 1 if random.random() < 0.25 else 0
-    for _ in range(num_ops):
-        op = random.choice(['+', '-'])
-        term = generate_term(depth, max_depth, allowed_vars)
-        result = f"{result}{op}{term}"
-    
-    return result
-
-
-def gen_arith_expr(allowed_vars):
-    """
-    Generate a valid arithmetic expression that can be parsed.
-    Optionally limit the length of the generated expression.
-    """
-    max_length = BLOCK_SIZE
-
-    # Start with a reasonable max_depth based on BLOCK_SIZE. Deeper expressions tend to be longer.
-    max_depth = 4
-    expr = generate_expr(depth=0, max_depth=max_depth, allowed_vars=allowed_vars)
-
-    # If expression is too long, regenerate with lower max_depth (stricter cap leaves headroom for comparisons/logic encoding)
-    while len(expr) > max_length//5:
-        max_depth = max(1, max_depth - 1)
-        expr = generate_expr(depth=0, max_depth=max_depth, allowed_vars=allowed_vars)
-
-    return expr
-
-
-# Variable names: letters only, no digits. Exclude names that are keywords.
-_VAR_NAME_LETTERS = 'abcdefghijklmnopqrstuvwxyz'  # single letters (no 'v' to avoid 'var')
-
-
-def _new_var_name(declared: list) -> str:
-    """Return a variable name not in declared, not a keyword, and not a template name. Letters only."""
-    forbidden = (
-        set(declared)
-        | set(tokens.KEYWORDS)
-        | {n for n, _, _ in FUNC_TEMPLATES}
-    )
-    # Single-letter names first
-    available = [c for c in _VAR_NAME_LETTERS if c not in forbidden]
-    if available:
-        return random.choice(available)
-    # Fallback: two-letter names (letters only)
-    for c1 in _VAR_NAME_LETTERS:
-        for c2 in _VAR_NAME_LETTERS:
-            name = c1 + c2
-            if name not in forbidden:
-                return name
-    # Last resort: longer names (should not happen in practice)
-    for length in range(3, 10):
-        for _ in range(100):
-            name = ''.join(random.choice(_VAR_NAME_LETTERS) for _ in range(length))
-            if name not in forbidden:
-                return name
-    return 'x'
-
-
-BOOLEAN_LITERALS = [tokens.NULL, tokens.TRUE, tokens.FALSE]
-
-
-def generate_program_expression(allowed_vars) -> str:
-    """
-    Generate an expression compatible with the full grammar, including
-    arithmetic, comparison operators, logical AND/OR, and the identifiers
-    True, False and null.
-    """
-
-    # Start from either a boolean-like identifier or a plain arithmetic expression
-    if random.random() < 0.3:
-        expr = random.choice(BOOLEAN_LITERALS)
-    else:
-        expr = gen_arith_expr(allowed_vars)
-
-    # Optionally add one or more comparison operations (slightly lower so more fit in BLOCK_SIZE)
-    if random.random() < 0.20:
-        num_comparisons = random.randint(0, 1)
-        for _ in range(num_comparisons):
-            op = random.choice(['==', '!=', '<', '>', '<=', '>='])
-            right = gen_arith_expr(allowed_vars)
-            expr = f"{expr}{op}{right}"
-
-    # Optional leading NOT (low prob to keep equations small)
-    if random.random() < 0.15:
-        expr = f"{tokens.NOT} {expr}"
-
-    # Optionally chain with AND/OR (often 0 to keep equations small)
-    num_logic_ops = 1 if random.random() < 0.2 else 0
-    for _ in range(num_logic_ops):
-        op = random.choice([tokens.AND, tokens.OR])
-        right = gen_arith_expr(allowed_vars)
-        # Sometimes turn the right-hand side into a comparison expression as well
-        if random.random() < 0.7:
-            num_cmp = random.randint(0, 1)
-            for _ in range(num_cmp):
-                cmp_op = random.choice(['==', '!=', '<', '>', '<=', '>='])
-                right = f"{right}{cmp_op}{gen_arith_expr(allowed_vars)}"
-        if random.random() < 0.3:
-            right = f"{tokens.NOT} {right}"
-        expr = f"{expr} {op} {right}"
-
-    return expr
-
-
-def generate_program_statements(texts) -> list:
-    """Generates a short program with valid statements. Each statement is either a variable declaration
-    ('var x = expr') or a standalone expression. Expressions may use previously declared variables."""
-    declared = copy.copy(BOOLEAN_LITERALS)
-    statements = []
-    num_statements = random.randint(2, 5)
-
-    for _ in range(num_statements):
-        while True:
-            if not declared or random.random() < 0.8:
-                # Variable declaration: var name = expr
-                name = _new_var_name(declared)
-                expr = generate_program_expression(declared)
-                text = f"{tokens.VAR} {name} = {expr}"
-                if text not in texts:
-                    declared.append(name)
-                    break
-            else:
-                # Standalone expression (can use declared variables)
-                text = generate_program_expression(declared)
-                if text not in texts:
-                    break
-
-        texts.add(text)
-        statements.append(text)
-
-    return statements
-
-
-# ---------------------------------------------------------------------------
-# Template names: function call syntax name(args) and infix syntax left name right (arity-2 only).
-# Sorted by name; used for compilation, symbol injection, and AST inlining.
-# ---------------------------------------------------------------------------
-FUNC_TEMPLATES = [
-    ("add", ["x", "y"], "x+y"),
-    ("add3", ["a", "b", "c"], "a+b+c"),
-    ("add4", ["a", "b", "c", "d"], "a+b+c+d"),
-    ("antip", ["a", "b"], "0-a*b"),
-    ("apart", ["a", "b"], "a-b"),
-    ("avg", ["a", "b"], "(a+b)/2"),
-    ("balance", ["a", "b"], "(a+b)/2"),
-    ("blend", ["a", "b"], "(a+b)/2"),
-    ("boost", ["n"], "n+n"),
-    ("brim", ["x"], "x+x"),
-    ("bump2", ["n"], "n+2"),
-    ("burst", ["n"], "n+n+n+n"),
-    ("chime", ["n"], "n+1"),
-    ("combo", ["a", "b"], "a*b+a+b"),
-    ("crisp", ["x"], "x*x"),
-    ("cube", ["x"], "x*x*x"),
-    ("cubeln", ["x"], "x*x*x+x"),
-    ("dec", ["n"], "n-1"),
-    ("dec2", ["n"], "n-2"),
-    ("dice", ["a", "b"], "a*b"),
-    ("diff", ["x", "y"], "x-y"),
-    ("dist", ["a", "b"], "a-b"),
-    ("dotpair", ["a", "b"], "a*b"),
-    ("double", ["x"], "x+x"),
-    ("double2", ["x"], "x*2"),
-    ("duplex", ["x"], "x+x"),
-    ("edge", ["a", "b"], "a*a+b*b"),
-    ("epic", ["a", "b", "c"], "(a+b+c)/3"),
-    ("fold4", ["a", "b", "c", "d"], "a+b+c+d"),
-    ("fourth", ["x"], "x*x*x*x"),
-    ("fuzzy", ["a", "b"], "(a+b)/2"),
-    ("geom3", ["a", "b", "c"], "a*b*c"),
-    ("glide", ["x"], "x/2"),
-    ("grip", ["a", "b"], "a-b"),
-    ("halve", ["x"], "x/2"),
-    ("halve3", ["x"], "x/3"),
-    ("hinge", ["a", "b"], "a*b+a+b"),
-    ("inc", ["n"], "n+1"),
-    ("invmix", ["a", "b"], "a*(0-b)"),
-    ("jolt", ["n"], "n+3"),
-    ("jump", ["n"], "n+2"),
-    ("layer", ["x"], "x*x+x"),
-    ("lift2", ["x"], "x+2"),
-    ("merge", ["a", "b"], "a+b"),
-    ("mid3", ["a", "b", "c"], "(a+b+c)/3"),
-    ("mix2", ["a", "b"], "(a+b)/2"),
-    ("mul", ["a", "b"], "a*b"),
-    ("mul3", ["a", "b", "c"], "a*b*c"),
-    ("neg8", ["x"], "0-x"),
-    ("negate", ["x"], "not x"),
-    ("nook", ["x"], "0-x-x"),
-    ("over", ["a", "b"], "a/b"),
-    ("plus", ["a", "b"], "a+b"),
-    ("poly2", ["x"], "x*x+x"),
-    ("prod", ["x", "y"], "x*y"),
-    ("quad", ["x"], "x*x*x*x"),
-    ("ramp", ["n"], "n+n+n+n"),
-    ("reach", ["x"], "1/x"),
-    ("ring", ["a", "b", "c"], "a+b+c"),
-    ("scale", ["x", "f"], "x*f"),
-    ("skew", ["a", "b", "c"], "a+b*2+c"),
-    ("slip", ["a", "b"], "a-b"),
-    ("spark", ["x"], "x*3"),
-    ("square", ["x"], "x*x"),
-    ("sub", ["a", "b"], "a-b"),
-    ("sum", ["a", "b"], "a+b"),
-    ("sumsq", ["a", "b"], "a*a+b*b"),
-    ("surge", ["n"], "n+n+n"),
-    ("swath", ["a", "b"], "a*a+b*b"),
-    ("sweep", ["a", "b"], "a/b"),
-    ("tap", ["x"], "x+x"),
-    ("thrice", ["n"], "n+n+n"),
-    ("thrice2", ["x"], "x*3"),
-    ("tilt", ["a", "b"], "a-b"),
-    ("times", ["a", "b"], "a*b"),
-    ("minus", ["a", "b"], "a-b"),
-    ("subtract", ["a", "b"], "a-b"),
-    ("times8", ["x"], "x*8"),
-    ("triple", ["n"], "n+n+n"),
-    ("twin", ["x"], "x+x"),
-    ("twist", ["a", "b"], "a-b"),
-    ("wedge", ["a", "b"], "a*b-a"),
-]
-
-
-_COMPILED_FUNC_TEMPLATES = None
-_COMPILED_OP_TEMPLATES = None
-
+########################
+# TEMPLATES
+########################
 
 def _unwrap_single_statement(node):
-    """Strip the `statements` ListNode that `Parser.parse` wraps around a lone expression.
+    """Strip the BlockNode that `Parser.parse` wraps around a lone expression.
 
     Template bodies are single expressions, and a `Function` returns whatever its body
     node evaluates to. Left wrapped, every template call would return List([value])
     instead of value, so `7 + (8 times 8)` becomes an illegal operation.
     """
-    if isinstance(node, basic.ListNode) and len(node.element_nodes) == 1:
-        return node.element_nodes[0]
+    if isinstance(node, basic.BlockNode) and len(node.statement_nodes) == 1:
+        return node.statement_nodes[0]
     return node
 
 
+@functools.cache
 def _get_compiled_func_templates():
     """Compile FUNC_TEMPLATES body expressions into AST nodes once."""
-    global _COMPILED_FUNC_TEMPLATES
-    if _COMPILED_FUNC_TEMPLATES is not None:
-        return _COMPILED_FUNC_TEMPLATES
-
     compiled = []
     for name, params, body in FUNC_TEMPLATES:
         lexer = basic.Lexer('<func_template>', body)
@@ -399,231 +59,922 @@ def _get_compiled_func_templates():
         if ast.error:
             continue
         compiled.append((name, params, _unwrap_single_statement(ast.node)))
-
-    _COMPILED_FUNC_TEMPLATES = compiled
-    return _COMPILED_FUNC_TEMPLATES
+    return compiled
 
 
-def _get_compiled_op_templates():
-    """Compile FUNC_TEMPLATES body expressions into AST nodes (parallel to FUNC_TEMPLATES)."""
-    global _COMPILED_OP_TEMPLATES
-    if _COMPILED_OP_TEMPLATES is not None:
-        return _COMPILED_OP_TEMPLATES
-
-    compiled = []
-    for name, params, body in FUNC_TEMPLATES:
-        lexer = basic.Lexer('<op_template>', body)
-        body_tokens, error = lexer.make_tokens()
-        if error:
-            continue
-        parser = basic.Parser(body_tokens)
-        ast = parser.parse()
-        if ast.error:
-            continue
-        compiled.append((name, params, _unwrap_single_statement(ast.node)))
-
-    _COMPILED_OP_TEMPLATES = compiled
-    return _COMPILED_OP_TEMPLATES
+@functools.cache
+def _templates_by_name():
+    return {name: (params, body_node) for name, params, body_node in _get_compiled_func_templates()}
 
 
 def _load_template_functions_into_context(context):
     """
-    Inject template bodies for FUNC names and for infix OP names (used at runtime via visit_BinOp + Function).
-    Template bodies are bare expressions with no explicit `return`, so they need
-    should_auto_return=True; block-bodied functions would use False and return explicitly.
+    Inject template bodies as functions, callable as `name(a, b)` and as infix `a name b`
+    (visit_BinOpNode runs the same Function). Template bodies are bare expressions with no
+    explicit `return`, so they need should_auto_return=True; block-bodied functions would use
+    False and return explicitly.
     """
     for name, params, body_node in _get_compiled_func_templates():
         func_value = basic.Function(name, body_node, params, should_auto_return=True).set_context(context).set_pos()
         context.symbol_table.set(name, func_value)
 
-    for name, params, body_node in _get_compiled_op_templates():
-        func_value = basic.Function(name, body_node, params, should_auto_return=True).set_context(context).set_pos()
-        context.symbol_table.set(name, func_value)
+
+def _map_child_nodes(node, fn):
+    """Shallow copy of `node` with `fn` applied to each child node, however it is held
+    (IfNode keeps children in tuples, CallNode, ListNode and BlockNode in lists)."""
+    def map_value(value):
+        if isinstance(value, list):
+            return [map_value(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(map_value(v) for v in value)
+        if type(value).__name__.endswith('Node'):
+            return fn(value)
+        return value
+
+    new_node = copy.copy(node)
+    for key, value in vars(node).items():
+        setattr(new_node, key, map_value(value))
+    return new_node
 
 
-def _find_matching_paren(text: str, open_idx: int) -> int:
-    depth = 0
-    for idx in range(open_idx, len(text)):
-        if text[idx] == '(':
-            depth += 1
-        elif text[idx] == ')':
-            depth -= 1
-            if depth == 0:
-                return idx
-    return -1
+def _substitute_params(body_node, params, args):
+    """`body_node` with every parameter reference replaced by its argument node. All at once,
+    so an argument that mentions another parameter's name (`sum(b, 1)` for `a+b`) is left alone."""
+    bindings = dict(zip(params, args))
+
+    def substitute(node):
+        if isinstance(node, basic.VarAccessNode) and node.var_name_tok.value in bindings:
+            return bindings[node.var_name_tok.value]
+        return _map_child_nodes(node, substitute)
+
+    return substitute(body_node)
 
 
-def _split_top_level_args(args_text: str) -> list[str]:
-    """Split CallNode arg string on top-level spaces."""
-    args = []
-    current = []
-    depth = 0
+def inline_templates(node):
+    """Replace template calls `sum(a, b)` and infix uses `a sum b` with the template's body,
+    so the AST the model learns to emit only uses primitive operations."""
+    templates = _templates_by_name()
 
-    for ch in args_text:
-        if ch == '(':
-            depth += 1
-            current.append(ch)
-        elif ch == ')':
-            depth -= 1
-            current.append(ch)
-        elif ch == ' ' and depth == 0:
-            if current:
-                args.append(''.join(current).strip())
-                current = []
+    def inline(node):
+        node = _map_child_nodes(node, inline)  # Arguments first.
+        if isinstance(node, basic.CallNode) and isinstance(node.node_to_call, basic.VarAccessNode):
+            name, args = node.node_to_call.var_name_tok.value, node.arg_nodes
+        elif isinstance(node, basic.BinOpNode) and node.op_tok.type == tokens.IDENTIFIER:
+            name, args = node.op_tok.value, [node.left_node, node.right_node]
         else:
-            current.append(ch)
+            return node
+        if name not in templates or len(templates[name][0]) != len(args):
+            return node
+        params, body_node = templates[name]
+        return inline(_substitute_params(body_node, params, args))  # The body may use templates too.
 
-    if current:
-        args.append(''.join(current).strip())
-
-    return [a for a in args if a]
-
-
-def _replace_template_calls_in_expr(expr_text: str, templates_map: dict) -> str:
-    """
-    Rewrite template calls in AST string form:
-    (IDENTIFIER:sum(INT:9 INT:8)) -> (INT:9 PLUS INT:8)
-    """
-    out = []
-    i = 0
-    ident_prefix = '(IDENTIFIER:'
-
-    while i < len(expr_text):
-        if expr_text.startswith(ident_prefix, i):
-            name_start = i + len(ident_prefix)
-            name_end = name_start
-            while name_end < len(expr_text) and (expr_text[name_end].isalnum() or expr_text[name_end] == '_'):
-                name_end += 1
-
-            func_name = expr_text[name_start:name_end]
-            if name_end < len(expr_text) and expr_text[name_end] == '(' and func_name in templates_map:
-                args_open = name_end
-                args_close = _find_matching_paren(expr_text, args_open)
-                if args_close != -1 and args_close + 1 < len(expr_text) and expr_text[args_close + 1] == ')':
-                    raw_args = expr_text[args_open + 1:args_close]
-                    arg_exprs = _split_top_level_args(raw_args) if raw_args.strip() else []
-                    params, body_ast = templates_map[func_name]
-
-                    if len(arg_exprs) == len(params):
-                        expanded_args = [
-                            _replace_template_calls_in_expr(arg, templates_map)
-                            for arg in arg_exprs
-                        ]
-                        replaced = body_ast
-                        for param, arg in zip(params, expanded_args):
-                            replaced = re.sub(
-                                rf'IDENTIFIER:{re.escape(param)}\b',
-                                lambda _m, a=arg: a,
-                                replaced
-                            )
-                        replaced = _replace_template_calls_in_expr(replaced, templates_map)
-                        out.append(replaced)
-                        i = args_close + 2  # consume " )) "
-                        continue
-
-        out.append(expr_text[i])
-        i += 1
-
-    return ''.join(out)
+    return inline(node)
 
 
-def _parse_one_ast_node(s: str, start: int):
-    """Parse one AST subtree string at start; returns (node_str, end_index) or (None, start)."""
-    while start < len(s) and s[start].isspace():
-        start += 1
-    if start >= len(s):
-        return None, start
-    if s[start] == '(':
-        close = _find_matching_paren(s, start)
-        if close == -1:
-            return None, start
-        return s[start : close + 1], close + 1
-    m = re.match(r'[A-Za-z_]+:[^\s()]+', s[start:])
-    if m:
-        return m.group(0), start + len(m.group(0))
-    return None, start
+########################
+# TYPES
+########################
+
+NUM, STR = 'num', 'str'
 
 
-def _try_expand_infix_op(segment: str, op_map: dict) -> Optional[str]:
-    """If segment is '(left IDENTIFIER:op right)' for a template op, return inlined body AST string."""
-    if len(segment) < 2 or segment[0] != '(' or segment[-1] != ')':
-        return None
-    inner = segment[1:-1]
-    for op_name, (params, body_ast) in op_map.items():
-        needle = f' IDENTIFIER:{op_name} '
-        pos = inner.find(needle)
-        while pos != -1:
-            left_s, le = _parse_one_ast_node(inner, 0)
-            r_start = pos + len(needle)
-            right_s, rend = _parse_one_ast_node(inner, r_start)
-            if (
-                left_s is not None
-                and right_s is not None
-                and le == pos
-                and rend == len(inner)
-                and len(params) == 2
-            ):
-                replaced = body_ast
-                for param, arg in zip(params, (left_s, right_s)):
-                    replaced = re.sub(
-                        rf'IDENTIFIER:{re.escape(param)}\b',
-                        lambda _m, a=arg: a,
-                        replaced,
-                    )
-                return replaced
-            pos = inner.find(needle, pos + 1)
+def list_of(elem):
+    return ('list', elem)
+
+
+def fun_of(params, ret):
+    return ('fun', tuple(params), ret)
+
+
+def is_list(t):
+    return isinstance(t, tuple) and t[0] == 'list'
+
+
+def matches(actual, wanted):
+    """An empty list, typed `list_of(None)`, can stand in for a list of anything."""
+    return actual == wanted or (is_list(actual) and is_list(wanted) and actual[1] is None)
+
+
+def random_type():
+    r = random.random()
+    if r < 0.5:
+        return NUM
+    if r < 0.7:
+        return STR
+    if r < 0.95:
+        return list_of(random.choice([NUM, NUM, STR]))
+    return list_of(list_of(NUM))
+
+
+def value_type(value):
+    """Type of a runtime value, or None for values the generator doesn't use (mixed lists)."""
+    if isinstance(value, basic.Number):
+        return NUM if isinstance(value.value, (int, float)) else None
+    if isinstance(value, basic.String):
+        return STR
+    if isinstance(value, basic.List):
+        types = {value_type(element) for element in value.elements}
+        if not types:
+            return list_of(None)
+        if len(types) == 1 and None not in types:
+            return list_of(types.pop())
     return None
 
 
-def _replace_infix_identifier_ops_in_expr(expr_text: str, op_map: dict) -> str:
-    """Inline (left IDENTIFIER:op right) using FUNC_TEMPLATES bodies."""
-    if not op_map:
-        return expr_text
-    out = expr_text
-    changed = True
-    while changed:
-        changed = False
-        i = 0
-        while i < len(out):
-            if out[i] == '(':
-                close = _find_matching_paren(out, i)
-                if close != -1:
-                    seg = out[i : close + 1]
-                    exp = _try_expand_infix_op(seg, op_map)
-                    if exp is not None:
-                        out = out[:i] + exp + out[close + 1 :]
-                        changed = True
-                        break
-            i += 1
-    return out
+########################
+# NAMES
+########################
+
+CONSTANTS = [tokens.NULL, tokens.TRUE, tokens.FALSE, 'math_pi']
+BUILT_INS = {name for name, value in basic.global_symbol_table.symbols.items() if isinstance(value, basic.BuiltInFunction)}
+# Never assigned: keywords, built-ins, constants, and templates (inlining rewrites any call by name).
+RESERVED = set(tokens.KEYWORDS) | BUILT_INS | set(CONSTANTS) | {name for name, _, _ in FUNC_TEMPLATES}
+LETTERS = 'abcdefghijklmnopqrstuvwxyz'
 
 
-def get_replaced_methods(ast_text: str) -> str:
-    """Inline function calls and learned infix ops into primitive AST."""
-    func_map = {
-        name: (params, str(body_node))
-        for name, params, body_node in _get_compiled_func_templates()
-    }
-    op_map = {
-        name: (params, str(body_node))
-        for name, params, body_node in _get_compiled_op_templates()
-    }
-    prev = None
-    t = ast_text
-    while t != prev:
-        prev = t
-        t = _replace_template_calls_in_expr(t, func_map)
-        t = _replace_infix_identifier_ops_in_expr(t, op_map)
-    return t
+def new_context():
+    """A program context with only the built-ins, constants and templates. Not a copy of the
+    global table, which a REPL session or a test may have filled with variables (and lists the
+    copy would share)."""
+    table = basic.get_symbol_table()
+    table.symbols = {name: value for name, value in table.symbols.items() if name in BUILT_INS or name in CONSTANTS}
+    context = basic.Context('<program>')
+    context.symbol_table = table
+    _load_template_functions_into_context(context)
+    return context
 
 
-def _substitute_params(body, params, args):
-    """Replace parameter names in body with concrete argument values (whole-word)."""
-    result = body
-    for param, arg in zip(params, args):
-        result = re.sub(rf'\b{re.escape(param)}\b', arg, result)
-    return result
+def _template_signatures():
+    """name -> (fun type, indexes of the params the body divides by), read off the template bodies."""
+    signatures = {}
+    for name, params, body in _get_compiled_func_templates():
+        divisors = set()
 
+        def find_divisors(node):
+            if isinstance(node, basic.BinOpNode) and node.op_tok.type == tokens.DIV \
+                    and isinstance(node.right_node, basic.VarAccessNode) and node.right_node.var_name_tok.value in params:
+                divisors.add(params.index(node.right_node.var_name_tok.value))
+            return _map_child_nodes(node, find_divisors)
+
+        find_divisors(body)
+        signatures[name] = (fun_of([NUM] * len(params), NUM), divisors)
+    return signatures
+
+
+TEMPLATES = _template_signatures()
+
+
+########################
+# PRINTING
+########################
+
+# How tightly a printed expression binds, following grammar.txt. An operand whose level is
+# above what its position allows gets parenthesized. GREEDY forms (inline if/for/while/def,
+# `var x = ...`) run to the end of the line, so they're parenthesized whenever anything follows.
+ATOM, POWER, UNARY, TERM, ARITH, COMP, NOT, LOGIC, GREEDY = range(9)
+
+Expr = namedtuple('Expr', 'src type level')
+
+
+def operand(expr, max_level):
+    if expr.level > max_level or (expr.level > ATOM and random.random() < 0.05):
+        return f'({expr.src})'
+    return expr.src
+
+
+def binary(left, op, right, type_, level, left_max, right_max):
+    space = ' ' if op[0].isalpha() or random.random() < 0.7 else ''  # Word operators need their spaces.
+    return Expr(f'{operand(left, left_max)}{space}{op}{space}{operand(right, right_max)}', type_, level)
+
+
+def int_literal(value):
+    return Expr(str(value), NUM, ATOM) if value >= 0 else Expr(f'-{-value}', NUM, UNARY)
+
+
+def log_scale_int(low, high):
+    """An integer in [low, high], log-uniform so smaller numbers are more likely. `low` must be >= 1."""
+    if low >= high:
+        return low
+    value = math.exp(random.uniform(math.log(low), math.log(high)))
+    return min(high, max(low, round(value)))
+
+
+def num_literal(nonzero=False):
+    r = random.random()
+    if r < 0.1 and not nonzero:
+        return '0'
+    if r < 0.75:
+        return str(log_scale_int(1, 1000))
+    if r < 0.85:
+        return str(log_scale_int(1, 10**6))
+    return f'{log_scale_int(1, 1000)}.{random.randint(1, 99):02d}'
+
+
+COMMENTS = ['# note', '# todo: check this', '#x = 1 (not code)']
+STRING_WORDS = ['', 'a', 'hi', 'latent', 'lang', 'x y', 'hello world', 'ok!', 'n=1']
+STRING_CHARS = 'abcxyz  ()[]:,."\'\\\n\t'
+
+
+def str_literal():
+    if random.random() < 0.7:
+        value = random.choice(STRING_WORDS)
+    else:
+        value = ''.join(random.choice(STRING_CHARS) for _ in range(random.randint(1, 5)))
+    quote = random.choice('"\'')
+    escaped = value.replace('\\', '\\\\').replace(quote, f'\\{quote}').replace('\n', '\\n').replace('\t', '\\t')
+    return f'{quote}{escaped}{quote}'
+
+
+def call_text(callee, args):
+    return f'{callee}({("," if random.random() < 0.3 else ", ").join(args)})'
+
+
+########################
+# SCOPE
+########################
+
+class Scope:
+    """What a statement may use. The top-level scope is read from the real symbol table, so it also
+    knows current values; a body's scope is tracked while generating it and only knows types."""
+
+    def __init__(self, variables, functions, values=None, in_loop=False, return_type=None, fixed=()):
+        self.variables = variables  # name -> type of the data it holds
+        self.functions = functions  # name -> fun type of the user function it holds
+        self.values = values or {}  # name -> current basic.Value, top level only
+        self.in_loop = in_loop
+        self.return_type = return_type  # set inside a function body
+        self.fixed = set(fixed)  # names the body must not reassign, like its while counter
+
+    def child(self, **changes):
+        """A body's scope: its own copies, and no known values (a loop body runs many times)."""
+        scope = Scope(dict(self.variables), dict(self.functions), None, self.in_loop, self.return_type, self.fixed)
+        for key, value in changes.items():
+            setattr(scope, key, value)
+        return scope
+
+    def of_type(self, wanted):
+        return [name for name, t in self.variables.items() if matches(t, wanted)]
+
+    def assignable(self, wanted=None):
+        return [name for name, t in self.variables.items()
+                if name not in CONSTANTS and name not in self.fixed and (wanted is None or t == wanted)]
+
+    def known_length(self, name):
+        value = self.values.get(name)
+        return len(value.elements) if isinstance(value, basic.List) else None
+
+
+def symbol_reprs(symbols):
+    return {name: repr(value) for name, value in symbols.items()}
+
+
+def choose(options):
+    """Call a weighted random option; options returning None don't apply, so try another."""
+    options = [(weight, make) for weight, make in options if weight > 0]
+    while options:
+        index = random.choices(range(len(options)), weights=[weight for weight, _ in options])[0]
+        result = options.pop(index)[1]()
+        if result is not None:
+            return result
+    return None
+
+
+########################
+# GENERATOR
+########################
+
+STATS = Counter()  # Statements drawn, kept and rejected (with why), across all programs.
+
+
+class ProgramGenerator:
+    MAX_ATTEMPTS = 40
+    INDENT = '    '
+
+    def __init__(self, texts):
+        self.texts = texts  # Every statement already used, so none repeats across the dataset.
+        self.accepted = []  # (text, AST node) per kept statement
+        self.signatures = {}  # name -> fun type, for user functions in kept statements
+        self.next_kind = None  # Statement kind a setup statement prepared for.
+        self.symbols, _ = self.run([])
+
+    @staticmethod
+    def run(nodes):
+        """Run `nodes` as one program: (symbols, None), or (None, why it failed)."""
+        context = new_context()
+        interpreter = basic.Interpreter(max_steps=MAX_INTERPRETER_STEPS)
+        for node in nodes:
+            try:
+                res = interpreter.visit(node, context)
+            except RecursionError:
+                return None, 'recursion limit'
+            except Exception as e:  # Operations the interpreter doesn't guard, e.g. float overflow.
+                return None, f'python {type(e).__name__}'
+            if res.error:
+                return None, 'step limit' if isinstance(res.error, basic.StepLimitError) else 'runtime error'
+        return context.symbol_table.symbols, None
+
+    # Retries of one statement kind shrink it, so kinds that tend to run past BLOCK_SIZE (blocks)
+    # get smaller instead of being replaced by kinds that fit (assignments).
+    DEPTHS = [2, 2, 2, 1, 1, 1, 1, 0, 0, 0]
+
+    def add_statement(self):
+        """Draw statements until one is valid after the kept ones; False if none was."""
+        for attempt in range(self.MAX_ATTEMPTS):
+            if attempt % len(self.DEPTHS) == 0:
+                kind = self.next_kind or random.choices(list(self.KINDS), weights=list(self.KINDS.values()))[0]
+                self.next_kind = None
+            self.pending = {}  # Function signatures this candidate introduces.
+            self.used_names = set()
+            self.sep = '\n' if random.random() < 0.8 else '; '
+            lines = self.top_statement(kind, self.DEPTHS[attempt % len(self.DEPTHS)])
+            label = kind
+            if lines is None:
+                # The kind needs a variable that isn't there yet (a while counter, a list for a
+                # built-in): assign one now, and draw that kind again next. A rejected setup is
+                # retried as the same kind, so it gets another setup.
+                self.next_kind, label = kind, 'setup'
+                lines = self.setup_statement(kind)
+            reason = self.try_accept(self.with_comment(lines[0]))
+            STATS[f'drawn {label}'] += 1
+            STATS[f'kept {label}' if reason is None else f'rejected: {reason}'] += 1
+            if reason is None:
+                return True
+        return False
+
+    def try_accept(self, text):
+        if text in self.texts:
+            return 'duplicate'
+        token_list, error = basic.Lexer('<stdin>', text).make_tokens()
+        if error:
+            return 'lex error'
+        ast = basic.Parser(token_list).parse()
+        if ast.error:
+            return 'syntax error'
+        lex_text = ' '.join(repr(token) for token in token_list)
+        inlined = inline_templates(ast.node)
+        ast_text = f'{tokens.SOF} {inlined} {tokens.EOF}'
+        if max(len(data.encode(lex_text, {})), len(data.encode(ast_text, {}))) > BLOCK_SIZE:
+            return 'too long'
+        prefix = [node for _, node in self.accepted]
+        symbols, reason = self.run(prefix + [ast.node])
+        if reason:
+            return reason
+        if repr(inlined) != repr(ast.node):
+            # The model learns the inlined form, which repeats an argument for each use of its
+            # parameter: an argument with side effects, like `square(pop(l, 0))`, would then run twice.
+            inlined_symbols, reason = self.run(prefix + [inlined])
+            if reason or symbol_reprs(inlined_symbols) != symbol_reprs(symbols):
+                return 'inlining changes the result'
+        self.texts.add(text)
+        self.accepted.append((text, ast.node))
+        self.signatures.update(self.pending)
+        self.symbols = symbols
+        return None
+
+    def top_scope(self):
+        variables = {name: NUM for name in CONSTANTS}
+        functions, values = {}, {}
+        for name, value in self.symbols.items():
+            if name in RESERVED:
+                continue
+            if isinstance(value, basic.Function):
+                signature = self.signatures.get(name)
+                if signature and len(signature[1]) == len(value.arg_names):
+                    functions[name] = signature
+                continue
+            type_ = value_type(value)
+            if type_ is not None:
+                variables[name] = type_
+                values[name] = value
+        return Scope(variables, functions, values)
+
+    def fresh_name(self, scope):
+        taken = set(scope.variables) | set(scope.functions) | set(self.symbols) | self.used_names | RESERVED
+        free = [c for c in LETTERS if c not in taken]
+        name = random.choice(free) if free else next(a + b for a in LETTERS for b in LETTERS if a + b not in taken)
+        self.used_names.add(name)
+        return name
+
+    # Layout
+
+    def block_text(self, head, statements):
+        """`head`, then the statements as an indented block (or `;`-separated on one line)."""
+        if self.sep == '\n':
+            body = '\n'.join(self.INDENT + line for statement in statements for line in statement.split('\n'))
+            blank = '\n' if random.random() < 0.1 else ''  # Blank lines before a block's first statement.
+            return f'{self.with_comment(head)}\n{blank}{body}'
+        return f'{head}; ' + '; '.join(statements)
+
+    def with_comment(self, line):
+        """Sometimes end `line` with a comment. Only in newline layout: a comment runs to the end of the line."""
+        if self.sep == '\n' and random.random() < 0.05:
+            return f'{line}  {random.choice(COMMENTS)}'
+        return line
+
+    def then_line(self, text, piece, new_line):
+        """Continue `text` with `piece`: on the same line after an inline branch, else on the next."""
+        return f'{text}{self.sep}{piece}' if new_line else f'{text} {piece}'
+
+    def if_text(self, cases, else_case):
+        """`cases`: (condition, body) pairs; a body is ('inline', statement) or ('block', statements)."""
+        text, after_block = None, False
+        branches = [(f'{tokens.IF if k == 0 else tokens.ELIF} {condition} then', body) for k, (condition, body) in enumerate(cases)]
+        if else_case:
+            branches.append((tokens.ELSE, else_case))
+        for head, (form, body) in branches:
+            piece = f'{head} {body}' if form == 'inline' else self.block_text(head, body)
+            text = piece if text is None else self.then_line(text, piece, after_block)
+            after_block = form == 'block'
+        return self.then_line(text, tokens.END, True) if after_block else text
+
+    # Statements: each returns a list of statement texts, or None when it doesn't apply.
+
+    KINDS = {'assign': 4, 'expression': 2, 'def': 2, 'if': 2.5, 'for': 2, 'while': 1.5, 'builtin': 1}
+
+    def top_statement(self, kind, depth):
+        scope = self.top_scope()
+        nest = 2 if depth > 1 else 1
+        if kind == 'assign':
+            return self.assign(scope, depth)
+        if kind == 'expression':
+            return self.expression_statement(scope, depth)
+        if kind == 'def':
+            return self.def_statement(scope, depth, nest)
+        if kind == 'if':
+            return self.if_statement(scope, depth, nest)
+        if kind == 'for':
+            return self.for_statement(scope, depth, nest)
+        if kind == 'while':
+            return self.while_statement(scope, depth, nest, top_level=True)
+        if kind == 'builtin':
+            return self.mutation_statement(scope, depth)
+        raise ValueError(f'Unknown statement kind: {kind}')
+
+    def setup_statement(self, kind):
+        """`var n = 2` for a while loop's counter, `var l = [...]` for a list built-in."""
+        scope = self.top_scope()
+        name = self.fresh_name(scope)
+        if kind == 'while':
+            # Wide range so the setup line stays unique across a large dataset; the loop bound is
+            # taken relative to it, so the loop stays short.
+            start = random.randint(-5, 10) if random.random() < 0.5 else log_scale_int(1, 10**4)
+            return [f'{tokens.VAR} {name} = {int_literal(start).src}']
+        return [f'{tokens.VAR} {name} = {self.list_literal(random.choice([NUM, STR]), scope, 1, random.randint(1, 3)).src}']
+
+    def block(self, scope, depth, nest):
+        """1-3 statements for a block body (fewer when shrinking), generated in `scope`, which they
+        extend as they go."""
+        statements = []
+        for _ in range(random.choice([1, 1, 2, 2, 3] if depth > 0 else [1, 1, 2])):
+            statements += self.body_statement(scope, depth, nest)
+        return statements
+
+    def body_statement(self, scope, depth, nest):
+        options = [
+            (4, lambda: self.assign(scope, depth)),
+            (2, lambda: self.expression_statement(scope, depth)),
+            (2, lambda: self.mutation_statement(scope, depth)),
+            (3 if scope.in_loop or scope.return_type else 0, lambda: self.control_statement(scope, depth)),
+        ]
+        if nest > 0:
+            options += [
+                (2, lambda: self.if_statement(scope, depth, nest - 1)),
+                (1, lambda: self.for_statement(scope, depth, nest - 1)),
+                (1, lambda: self.while_statement(scope, depth, nest - 1)),
+            ]
+        return choose(options)
+
+    def inline_statement(self, scope, depth):
+        """The single statement of an inline body. Its value is kept below GREEDY, so a following
+        `elif`/`else` can't be swallowed by it."""
+        options = [
+            (3, lambda: self.assign(scope, depth, inline=True)),
+            (2, lambda: self.expression_statement(scope, depth, inline=True)),
+            (2 if scope.in_loop or scope.return_type else 0, lambda: self.control_statement(scope, depth, inline=True)),
+        ]
+        return choose(options)[0]
+
+    def assign(self, scope, depth, inline=False):
+        if random.random() < 0.08:
+            return self.assign_function(scope, depth, inline)
+        existing = scope.assignable()
+        if existing and random.random() < 0.4:
+            name = random.choice(existing)
+            # Only the top level (the scope that knows values) may change a variable's type: a body
+            # runs later or repeatedly, and the rest of it relies on the type it started with.
+            in_body = not scope.values
+            type_ = scope.variables[name] if in_body or random.random() < 0.7 else random_type()
+            if type_ == list_of(None):
+                type_ = list_of(NUM)
+        else:
+            name, type_ = self.fresh_name(scope), random_type()
+        value = self.expr(type_, scope, depth)
+        scope.variables[name] = type_
+        scope.values.pop(name, None)
+        equals = ' = ' if random.random() < 0.8 else '='
+        return [f'{tokens.VAR} {name}{equals}{operand(value, LOGIC if inline else GREEDY)}']
+
+    def assign_function(self, scope, depth, inline):
+        """`var g = f` or `var g = def (a) -> ...`: g becomes callable with the same signature."""
+        name = self.fresh_name(scope)
+        if scope.functions and random.random() < 0.4:
+            source = random.choice(list(scope.functions))
+            value, signature = Expr(source, scope.functions[source], ATOM), scope.functions[source]
+        else:
+            value = self.anonymous_function(scope, depth)
+            signature = value.type
+        scope.functions[name] = signature
+        self.pending[name] = signature
+        return [f'{tokens.VAR} {name} = {operand(value, LOGIC if inline else GREEDY)}']
+
+    def expression_statement(self, scope, depth, inline=False):
+        value = self.expr(random_type(), scope, depth)
+        return [operand(value, LOGIC) if inline else value.src]
+
+    def control_statement(self, scope, depth, inline=False):
+        options = []
+        if scope.in_loop:
+            for keyword in (tokens.BREAK, tokens.CONTINUE):
+                options.append((1, lambda keyword=keyword: keyword))
+        if scope.return_type:
+            options.append((2, lambda: self.return_text(scope, depth)))
+        statement = choose(options)
+        if inline or random.random() < 0.3:
+            return [statement]
+        # Usually guarded, so the statements after it stay reachable.
+        return [f'{tokens.IF} {operand(self.condition(scope, depth), LOGIC)} then {statement}']
+
+    def return_text(self, scope, depth):
+        if scope.return_type == NUM and random.random() < 0.15:
+            return tokens.RETURN  # Returns null.
+        return f'{tokens.RETURN} {operand(self.expr(scope.return_type, scope, depth), LOGIC)}'
+
+    def mutation_statement(self, scope, depth):
+        """append(l, x), extend(l, m) or pop(l, i) on a list variable: in-place built-ins."""
+        lists = [name for name in scope.assignable() if is_list(scope.variables[name])]
+        if not lists:
+            return None
+        name = random.choice(lists)
+        elem = scope.variables[name][1] or random.choice([NUM, STR])
+        length = scope.known_length(name)
+        options = [
+            (2, lambda: call_text('append', [name, operand(self.expr(elem, scope, depth), GREEDY)])),
+            (1, lambda: call_text('extend', [name, operand(self.expr(list_of(elem), scope, depth), GREEDY)])),
+            (1 if length else 0, lambda: call_text('pop', [name, int_literal(random.randint(-length, length - 1)).src])),
+        ]
+        statement = choose(options)
+        scope.variables[name] = list_of(elem)
+        scope.values.pop(name, None)
+        return [statement]
+
+    def if_statement(self, scope, depth, nest):
+        cases = []
+        for _ in range(random.choice([1, 1, 2, 3] if depth > 1 else [1, 1, 2])):
+            cases.append((operand(self.condition(scope, depth), LOGIC), self.branch(scope, depth, nest)))
+        else_case = self.branch(scope, depth, nest) if random.random() < (0.5 if depth > 0 else 0.3) else None
+        return [self.if_text(cases, else_case)]
+
+    def branch(self, scope, depth, nest):
+        body_scope = scope.child()
+        if random.random() < 0.5:
+            return 'inline', self.inline_statement(body_scope, depth - 1 if depth > 0 else 0)
+        return 'block', self.block(body_scope, max(depth - 1, 0), nest)
+
+    def for_statement(self, scope, depth, nest):
+        variable = self.fresh_name(scope)
+        body_scope = scope.child(in_loop=True)
+        body_scope.variables[variable] = NUM
+        head = f'{tokens.FOR} {variable} = {self.loop_bounds(scope)} then'
+        if random.random() < 0.5:
+            return [f'{head} {self.inline_statement(body_scope, max(depth - 1, 0))}']
+        return [self.then_line(self.block_text(head, self.block(body_scope, max(depth - 1, 0), nest)), tokens.END, True)]
+
+    def loop_bounds(self, scope):
+        """`start to end [step s]` running 0-5 times."""
+        count = random.randint(0, 5)
+        lists = [name for name in scope.of_type(list_of(NUM)) + scope.of_type(list_of(STR))
+                 if scope.known_length(name) is not None and scope.known_length(name) <= 6]
+        if lists and random.random() < 0.15:
+            return f'0 {tokens.TO} len({random.choice(lists)})'
+        if random.random() < 0.2:
+            start = random.randint(3, 8)
+            return f'{start} {tokens.TO} {start - count} {tokens.STEP} -{random.choice([1, 1, 2])}'
+        start = random.randint(0, 3)
+        step = random.choice(['', '', f' {tokens.STEP} 1', f' {tokens.STEP} 2'])
+        return f'{start} {tokens.TO} {start + count}{step}'
+
+    def while_statement(self, scope, depth, nest, top_level=False, inline=None):
+        """A while loop that ends: a counter is moved first thing in the body (so a `continue`
+        can't skip it) towards a bound a few steps away."""
+        setup = []
+        if top_level:
+            counters = [name for name in scope.assignable(NUM)
+                        if isinstance(scope.values.get(name), basic.Number) and abs(scope.values[name].value) < 10**6]
+            if not counters:
+                return None
+            counter = random.choice(counters)
+            start = int(scope.values[counter].value)
+        else:
+            counter, start = self.fresh_name(scope), random.randint(0, 3)
+            setup = [f'{tokens.VAR} {counter} = {start}']
+            scope.variables[counter] = NUM
+
+        up = random.random() < 0.7
+        bound = int_literal(start + random.randint(1, 4) if up else start - random.randint(1, 4)).src
+        step = f'{tokens.VAR} {counter} = {counter} {"+" if up else "-"} 1'
+        test = f'{counter} {"<" if up else ">"} {bound}'
+        body_scope = scope.child(in_loop=True, fixed=scope.fixed | {counter})
+
+        form = 0 if inline else random.random()
+        if form < 0.3:
+            return setup + [f'{tokens.WHILE} {test} then {step}']
+        if form < 0.7:
+            head, body = f'{tokens.WHILE} {test} then', [step]
+        else:
+            head = f'{tokens.WHILE} {random.choice(["1", tokens.TRUE])} then'
+            body = [step, f'{tokens.IF} {counter} {">=" if up else "<="} {bound} then {tokens.BREAK}']
+        body += self.block(body_scope, max(depth - 1, 0), nest) if random.random() < 0.7 else []
+        return setup + [self.then_line(self.block_text(head, body), tokens.END, True)]
+
+    def def_statement(self, scope, depth, nest):
+        name = self.fresh_name(scope)
+        params = [self.fresh_name(scope) for _ in range(random.choice([0, 1, 1, 2, 2, 3]))]
+        param_types = [random.choice([NUM, NUM, NUM, STR, list_of(NUM)]) for _ in params]
+        ret = random_type()
+        # Function bodies see only their params and other functions: they run when called, by
+        # which time a global they read may hold another type.
+        body_scope = Scope({**{c: NUM for c in CONSTANTS}, **dict(zip(params, param_types))},
+                           dict(scope.functions), return_type=ret)
+        head = f'{tokens.FUN} {name}({", ".join(params)})'
+        signature = fun_of(param_types, ret)
+        scope.functions[name] = signature
+        self.pending[name] = signature
+
+        if random.random() < 0.5:
+            return [f'{head} -> {self.expr(ret, body_scope, max(depth - 1, 0)).src}']
+        body = self.block(body_scope, max(depth - 1, 0), nest - 1) if random.random() < 0.6 else []
+        if ret != NUM or random.random() < 0.7:  # A function that falls off its end returns null.
+            body.append(self.return_text(body_scope, max(depth - 1, 0)))
+        if not body:
+            body = [self.return_text(body_scope, 0)]
+        return [self.then_line(self.block_text(head, body), tokens.END, True)]
+
+    # Expressions
+
+    def expr(self, type_, scope, depth):
+        if type_ is None:
+            type_ = NUM
+        if type_ == NUM:
+            options = self.num_options(scope, depth)
+        elif type_ == STR:
+            options = self.str_options(scope, depth)
+        else:
+            options = self.list_options(type_, scope, depth)
+        if depth > 0:
+            d = depth - 1
+            options += [
+                (2, lambda: self.call(type_, scope, d)),
+                (1, lambda: self.index(type_, scope, d)),
+                (0.7, lambda: self.inline_if(type_, scope, d)),
+            ]
+        return choose(options)
+
+    def variable(self, type_, scope):
+        names = scope.of_type(type_)
+        own = [name for name in names if name not in CONSTANTS]
+        if own and random.random() < 0.85:  # Constants are always in scope; don't let them crowd out the rest.
+            names = own
+        return Expr(random.choice(names), type_, ATOM) if names else None
+
+    def num_options(self, scope, depth):
+        options = [
+            (3, lambda: Expr(num_literal(), NUM, ATOM)),
+            (4, lambda: self.variable(NUM, scope)),
+        ]
+        if depth > 0:
+            d = depth - 1
+            num = lambda: self.expr(NUM, scope, d)
+            options += [
+                (4, lambda: self.arithmetic(scope, d)),
+                (1, lambda: Expr(f'{random.choice(["-", "-", "+"])}{operand(num(), UNARY)}', NUM, UNARY)),
+                (1, lambda: binary(num(), '^', Expr(str(random.randint(0, 3)), NUM, ATOM), NUM, POWER, ATOM, UNARY)),
+                (2, lambda: binary(num(), random.choice(['==', '!=', '<', '>', '<=', '>=']), num(), NUM, COMP, COMP, ARITH)),
+                (1, lambda: binary(num(), random.choice([tokens.AND, tokens.OR]), num(), NUM, LOGIC, LOGIC, NOT)),
+                (1, lambda: Expr(f'{tokens.NOT} {operand(num(), NOT)}', NUM, NOT)),
+            ]
+        return options
+
+    def arithmetic(self, scope, depth):
+        op = random.choice(['+', '-', '*', '/'])
+        left = self.expr(NUM, scope, depth)
+        if op in '+-':
+            return binary(left, op, self.expr(NUM, scope, depth), NUM, ARITH, ARITH, TERM)
+        right = self.nonzero(scope, depth) if op == '/' else self.expr(NUM, scope, depth)
+        return binary(left, op, right, NUM, TERM, TERM, UNARY)
+
+    def nonzero(self, scope, depth):
+        known = [name for name in scope.of_type(NUM)
+                 if isinstance(scope.values.get(name), basic.Number) and scope.values[name].value != 0]
+        return choose([
+            (4, lambda: Expr(num_literal(nonzero=True), NUM, ATOM)),
+            (2 if known else 0, lambda: Expr(random.choice(known), NUM, ATOM)),
+            (1 if depth > 0 else 0, lambda: self.expr(NUM, scope, depth - 1)),
+        ])
+
+    def str_options(self, scope, depth):
+        options = [
+            (3, lambda: Expr(str_literal(), STR, ATOM)),
+            (4, lambda: self.variable(STR, scope)),
+        ]
+        if depth > 0:
+            d = depth - 1
+            text = lambda: self.expr(STR, scope, d)
+            options += [
+                (3, lambda: binary(text(), '+', text(), STR, ARITH, ARITH, TERM)),
+                (1, lambda: binary(text(), '*', Expr(str(random.randint(0, 3)), NUM, ATOM), STR, TERM, TERM, UNARY)),
+                (0.3, lambda: Expr(f'-{operand(text(), UNARY)}', STR, UNARY)),  # Evaluates to "".
+            ]
+        return options
+
+    def list_options(self, type_, scope, depth):
+        elem = type_[1]
+        options = [
+            (3, lambda: self.list_literal(elem, scope, depth, random.randint(0, 3))),
+            (4, lambda: self.variable(type_, scope)),
+        ]
+        if depth > 0:
+            d = depth - 1
+            options += [
+                (2, lambda: binary(self.expr(type_, scope, d), '+', self.expr(elem, scope, d), type_, ARITH, ARITH, TERM)),
+                (1, lambda: binary(self.expr(type_, scope, d), '*', self.expr(type_, scope, d), type_, TERM, TERM, UNARY)),
+                (1, lambda: self.pop_by_minus(type_, scope, d)),
+                (2, lambda: self.for_expression(elem, scope, d)),
+                (1 if elem == NUM and scope.values else 0, lambda: self.while_expression(scope)),
+            ]
+        return options
+
+    def list_literal(self, elem, scope, depth, length):
+        elements = [self.expr(elem, scope, max(depth - 1, 0)).src for _ in range(length)]
+        return Expr(f'[{("," if random.random() < 0.3 else ", ").join(elements)}]', list_of(elem), ATOM)
+
+    def indexable(self, list_type, scope, depth):
+        """A list of `list_type` whose length is known, with that length: a top-level variable or a literal."""
+        known = [name for name in scope.of_type(list_type) if scope.known_length(name)]
+        if known and random.random() < 0.7:
+            name = random.choice(known)
+            return Expr(name, list_type, ATOM), scope.known_length(name)
+        length = random.randint(1, 3)
+        return self.list_literal(list_type[1], scope, depth, length), length
+
+    def index(self, elem, scope, depth):
+        """`l / i`: the element at index i."""
+        source, length = self.indexable(list_of(elem), scope, depth)
+        return binary(source, '/', int_literal(random.randint(-length, length - 1)), elem, TERM, TERM, UNARY)
+
+    def pop_by_minus(self, type_, scope, depth):
+        """`l - i`: the list without its element at index i."""
+        source, length = self.indexable(type_, scope, depth)
+        return binary(source, '-', int_literal(random.randint(-length, length - 1)), type_, ARITH, ARITH, TERM)
+
+    def for_expression(self, elem, scope, depth):
+        """`for i = a to b then x`: the list of each iteration's x."""
+        variable = self.fresh_name(scope)
+        body_scope = scope.child(in_loop=True)
+        body_scope.variables[variable] = NUM
+        body = self.expr(elem, body_scope, depth)
+        return Expr(f'{tokens.FOR} {variable} = {self.loop_bounds(scope)} then {operand(body, LOGIC)}',
+                    list_of(elem), GREEDY)
+
+    def while_expression(self, scope):
+        """`while n < k then var n = n + 1`: the list of n's values. Top level only, where n's value is known."""
+        lines = self.while_statement(scope, 0, 0, top_level=True, inline=True)
+        return Expr(lines[0], list_of(NUM), GREEDY) if lines else None
+
+    def inline_if(self, type_, scope, depth):
+        branches = [f'{tokens.IF} {operand(self.condition(scope, depth), LOGIC)} then {operand(self.expr(type_, scope, depth), LOGIC)}']
+        if random.random() < 0.3:
+            branches.append(f'{tokens.ELIF} {operand(self.condition(scope, depth), LOGIC)} then {operand(self.expr(type_, scope, depth), LOGIC)}')
+        # Without an else an inline if can evaluate to null, which is only a NUM.
+        if type_ != NUM or random.random() < 0.7:
+            branches.append(f'{tokens.ELSE} {operand(self.expr(type_, scope, depth), LOGIC)}')
+        return Expr(' '.join(branches), type_, GREEDY)
+
+    def condition(self, scope, depth):
+        """Something `is_true` is defined for: a number (usually a comparison) or a string."""
+        if random.random() < 0.15:
+            return self.expr(STR, scope, depth)
+        if depth > 0 and random.random() < 0.6:
+            num = lambda: self.expr(NUM, scope, depth - 1)
+            return binary(num(), random.choice(['==', '!=', '<', '>', '<=', '>=']), num(), NUM, COMP, COMP, ARITH)
+        return self.expr(NUM, scope, depth)
+
+    def anonymous_function(self, scope, depth, ret=None):
+        params = [self.fresh_name(scope) for _ in range(random.choice([0, 1, 1, 2]))]
+        param_types = [random.choice([NUM, NUM, STR]) for _ in params]
+        ret = ret or random_type()
+        body_scope = Scope({**{c: NUM for c in CONSTANTS}, **dict(zip(params, param_types))},
+                           dict(scope.functions), return_type=ret)
+        body = self.expr(ret, body_scope, max(depth - 1, 0))
+        return Expr(f'{tokens.FUN} ({", ".join(params)}) -> {body.src}', fun_of(param_types, ret), GREEDY)
+
+    def call(self, type_, scope, depth):
+        """A call returning `type_`: user functions, templates, built-ins or `(def ...)(args)`."""
+        def args_for(params, divisors=()):
+            return [(self.nonzero(scope, depth) if i in divisors else self.expr(p, scope, depth)) for i, p in enumerate(params)]
+
+        def named(name, params, divisors=()):
+            args = args_for(params, divisors)
+            if len(args) == 2 and random.random() < 0.4:  # Infix: `a name b`.
+                return binary(args[0], name, args[1], type_, TERM, TERM, UNARY)
+            return Expr(call_text(name, [operand(a, GREEDY) for a in args]), type_, ATOM)
+
+        options = []
+        for name, (_, params, ret) in scope.functions.items():
+            if matches(ret, type_):
+                options.append((3, lambda name=name, params=params: named(name, params)))
+        if type_ == NUM:
+            options.append((4, lambda: named(*self.template())))
+            options.append((1, lambda: Expr(call_text('len', [operand(self.expr(list_of(random.choice([NUM, STR])), scope, depth), GREEDY)]), NUM, ATOM)))
+            options.append((1, lambda: Expr(call_text(random.choice(['is_num', 'is_str', 'is_list', 'is_fun']), [self.any_value(scope, depth)]), NUM, ATOM)))
+        if type_ == STR:
+            options.append((1, lambda: Expr(call_text('print_ret', [self.any_value(scope, depth)]), STR, ATOM)))
+        options.append((0.5, lambda: self.immediate_call(type_, scope, depth)))
+        lists = [name for name in scope.assignable(list_of(type_)) if scope.known_length(name)]
+        if lists:
+            name = random.choice(lists)
+            length = scope.known_length(name)
+            options.append((0.5, lambda: Expr(call_text('pop', [name, int_literal(random.randint(-length, length - 1)).src]), type_, ATOM)))
+        return choose(options)
+
+    def template(self):
+        name = random.choice(list(TEMPLATES))
+        (_, params, _), divisors = TEMPLATES[name]
+        return name, params, divisors
+
+    def immediate_call(self, type_, scope, depth):
+        """`(def (a) -> ...)(x)`."""
+        function = self.anonymous_function(scope, depth, ret=type_)
+        args = [operand(self.expr(p, scope, depth), GREEDY) for p in function.type[1]]
+        return Expr(call_text(f'({function.src})', args), type_, ATOM)
+
+    def any_value(self, scope, depth):
+        if scope.functions and random.random() < 0.1:
+            return random.choice(list(scope.functions))
+        return operand(self.expr(random_type(), scope, depth), GREEDY)
+
+
+def generate_program(texts):
+    """2-5 valid statements. `texts` holds every statement used so far, so none repeats."""
+    generator = ProgramGenerator(texts)
+    for _ in range(random.randint(2, 5)):
+        generator.add_statement()
+    return [text for text, _ in generator.accepted]
+
+
+########################
+# FEATURES
+########################
+
+def ast_features(node):
+    """Node types, operators and block/inline forms present in an AST."""
+    features = {type(node).__name__}
+    if isinstance(node, (basic.BinOpNode, basic.UnaryOpNode)):
+        op = node.op_tok
+        features.add(f'{type(node).__name__} {op.type}:{op.value}' if op.type == tokens.KEYWORD else f'{type(node).__name__} {op.type}')
+    if isinstance(node, basic.ListNode):
+        features.add('list literal')
+    if isinstance(node, basic.IfNode):
+        features |= {f'if {"block" if block else "inline"}' for _, _, block in node.cases}
+        features |= {'elif'} if len(node.cases) > 1 else set()
+        features |= {'else'} if node.else_case else set()
+    if isinstance(node, (basic.ForNode, basic.WhileNode)):
+        features.add(f'{type(node).__name__} {"block" if node.is_block else "inline"}')
+    if isinstance(node, basic.ForNode) and node.step_value_node:
+        features.add('for step')
+    if isinstance(node, basic.FuncDefNode):
+        features.add(f'def {"block" if node.is_block else "inline"}')
+        features.add('def named' if node.var_name_tok else 'def anonymous')
+    if isinstance(node, basic.ReturnNode):
+        features.add('return value' if node.node_to_return else 'return bare')
+
+    _map_child_nodes(node, lambda child: features.update(ast_features(child)) or child)
+    return features
+
+
+# Every feature `ast_features` can report; a generator covering the language produces them all.
+LANGUAGE_FEATURES = {
+    'NumberNode', 'StringNode', 'list literal', 'VarAccessNode', 'VarAssignNode', 'CallNode',
+    'ContinueNode', 'BreakNode', 'return value', 'return bare',
+    *(f'BinOpNode {op}' for op in ['PLUS', 'MINUS', 'MUL', 'DIV', 'POW', 'EE', 'NE', 'LT', 'GT', 'LTE', 'GTE', 'IDENTIFIER']),
+    'BinOpNode KEYWORD:and', 'BinOpNode KEYWORD:or', 'UnaryOpNode MINUS', 'UnaryOpNode PLUS', 'UnaryOpNode KEYWORD:not',
+    'if inline', 'if block', 'elif', 'else', 'ForNode inline', 'ForNode block', 'for step',
+    'WhileNode inline', 'WhileNode block', 'def inline', 'def block', 'def named', 'def anonymous',
+}
+
+
+########################
+# SAMPLES
+########################
 
 class Sample:
     lexer_text: str
@@ -650,98 +1001,81 @@ def print_program(statements):
     print('----------------------------------\n')
 
 
-def generate():
-    invalid_count = 0
-    rows = []
-    texts = set()
+def build_sample(statements, idx):
+    """The Sample for one program, or None if a statement doesn't lex, parse, run or fit
+    BLOCK_SIZE. The generator already checks all of that, so None means a bug."""
+    sample = Sample(statements, idx)
+    context = new_context()
 
-    for idx in range(NUM_TRAINING_SAMPLES):
-        is_valid = True
-        statements = generate_program_statements(texts)
-        symbol_table = basic.get_symbol_table()
-        sample = Sample(statements, idx)
+    for text in statements:
+        token_list, error = basic.Lexer('<stdin>', text).make_tokens()
+        if error:
+            return None
+        ast = basic.Parser(token_list).parse()
+        if ast.error:
+            return None
+        res = basic.Interpreter(max_steps=MAX_INTERPRETER_STEPS).visit(ast.node, context)
+        if res.error:
+            return None
 
+        lexer_text = ' '.join(repr(t) for t in token_list)
+        sample.lexer_text += f'\n{lexer_text}'
+        if random.random() < 0.5:  # Half the time the model reads it without `var`, so it learns to restore it.
+            token_list, error = basic.Lexer('<stdin>', text.replace('var ', '')).make_tokens()
+            if error:
+                return None
+            lexer_text = ' '.join(repr(t) for t in token_list)
+        ast_text = f'{tokens.SOF} {inline_templates(ast.node)} {tokens.EOF}'
+        sample.ast_text += f'\n{ast_text}'
+
+        lex_encoded, ast_encoded = data.encode(lexer_text, {}), data.encode(ast_text, {})
+        if len(lex_encoded) > BLOCK_SIZE or len(ast_encoded) > BLOCK_SIZE:
+            return None
+        # One token more than BLOCK_SIZE, so get_batch can shift it into the input and the target.
+        sample.x_in.append(data.add_pad_tokens_and_trim(lex_encoded, BLOCK_SIZE + 1))
+        sample.x_out.append(data.add_pad_tokens_and_trim(ast_encoded, BLOCK_SIZE + 1))
+        sample.symbols |= context.symbol_table.symbols
+        if res.value:
+            sample.symbols['_output_list'].append(res.value)
+    return sample
+
+
+def build_samples(count):
+    """`count` generated programs as sample rows, and how many failed to build (should be 0)."""
+    rows, failed, texts = [], 0, set()
+    for idx in range(count):
+        statements = generate_program(texts)
         if idx % 1_000 == 0:
             print_program(statements)
-            print(f"loaded: {(idx / NUM_TRAINING_SAMPLES) * 100:.2f}%")
-
-        for text in statements:
-            lexer = basic.Lexer('<stdin>', text)
-            try:
-                token_list, error = lexer.make_tokens()
-                if error:
-                    print(f'Lexing is invalid!: {error.as_string()}')
-                    invalid_count += 1
-                    is_valid = False
-                    break
-                lexer_text = ' '.join(t.__repr__() for t in token_list)
-                sample.lexer_text += f"\n{lexer_text}"
-
-                if random.random() < 0.5:
-                    text_error = text.replace('var ', '')
-                    lexer_error = basic.Lexer('<stdin>', text_error)
-                    token_list_error, error = lexer_error.make_tokens()
-                    if error:
-                        print(f'Lexing is invalid: {error.as_string()}')
-                        invalid_count += 1
-                        is_valid = False
-                        break
-                    lexer_text = ' '.join(t.__repr__() for t in token_list_error)
-
-                # Try to parse
-                parser = basic.Parser(token_list)
-                ast = parser.parse()
-                if ast.error:
-                    print(f'Parsing is invalid: {ast.error.as_string()}')
-                    invalid_count += 1
-                    is_valid = False
-                    break
-                ast_text = f'{tokens.SOF} {ast.node} {tokens.EOF}'
-                ast_text = get_replaced_methods(ast_text)
-                sample.ast_text += f'\n{ast_text}'
-
-                interpreter = basic.Interpreter()
-                context = basic.Context('<program>')
-                context.symbol_table = symbol_table
-                _load_template_functions_into_context(context)
-                res = interpreter.visit(ast.node, context)
-                symbol_table = context.symbol_table
-                if res.error:
-                    if 'zero' not in res.error.as_string():
-                        print(f'Interpretation is invalid!: {res.error.as_string()}')
-                    invalid_count += 1
-                    is_valid = False
-                    break
-
-                lex_encoded = data.encode(lexer_text, {})
-                ast_encoded = data.encode(ast_text, {})
-                if len(lex_encoded) <= BLOCK_SIZE and len(ast_encoded) <= BLOCK_SIZE:
-                    # The +1 more token to divide it between x and y upstream on the get_batch method.
-                    truncate_size = BLOCK_SIZE + 1
-                    sample.x_in.append(data.add_pad_tokens_and_trim(lex_encoded, truncate_size))
-                    sample.x_out.append(data.add_pad_tokens_and_trim(ast_encoded, truncate_size))
-                    sample.symbols |= symbol_table.symbols
-                    if res.value:
-                        sample.symbols['_output_list'].append(res.value)
-                else:  # Encodings are too long.
-                    invalid_count += 1
-                    is_valid = False
-                    break
-            except Exception:
-                invalid_count += 1
-                is_valid = False
-                break
-
-        if is_valid:
+            print(f'loaded: {idx / count * 100:.2f}%')
+        sample = build_sample(statements, idx)
+        if sample is None:
+            failed += 1
+        else:
             rows.append(sample.__dict__)
+    return rows, failed
 
+
+def print_stats():
+    drawn = sum(n for key, n in STATS.items() if key.startswith('drawn'))
+    kept = sum(n for key, n in STATS.items() if key.startswith('kept'))
+    print(f'\nStatements drawn: {drawn}, kept: {kept} ({kept / max(drawn, 1) * 100:.1f}%)')
+    for kind in [*ProgramGenerator.KINDS, 'setup']:
+        print(f'  {kind}: kept {STATS[f"kept {kind}"]} of {STATS[f"drawn {kind}"]}')
+    for key, n in sorted(STATS.items(), key=lambda kv: -kv[1]):
+        if key.startswith('rejected'):
+            print(f'  {key}: {n}')
+
+
+def generate():
+    """Build NUM_TRAINING_SAMPLES samples, shuffled, and pickle them to DATASET_NAME."""
+    rows, failed = build_samples(NUM_TRAINING_SAMPLES)
     samples_df = pd.DataFrame(rows)
-    # Random shuffle with random seed
     samples_df = samples_df.sample(frac=1, random_state=random.randint(0, 2**31 - 1)).reset_index(drop=True)
-    samples_df.to_pickle(DATASET_NAME)  # Save dataset as a Pandas DataFrame (pickled)
-
-    valid_count = len(samples_df)
-    print(f"\nSample generation: Valid: {valid_count}, Invalid: {invalid_count}, Success rate: {valid_count / NUM_TRAINING_SAMPLES * 100:.1f}%")
+    samples_df.to_pickle(DATASET_NAME)
+    print(f'\nSample generation: Valid: {len(samples_df)}, Failed: {failed}, '
+          f'Success rate: {len(samples_df) / NUM_TRAINING_SAMPLES * 100:.1f}%')
+    print_stats()
 
 
 if __name__ == '__main__':
