@@ -63,6 +63,8 @@ TOKENS = [
     POW,
     LPAREN,
     RPAREN,
+    LSQUARE,
+    RSQUARE,
     EQ,
     EE,
     NE,
@@ -73,6 +75,9 @@ TOKENS = [
     COMMA,
     ARROW,
     NEWLINE,
+    NULL,
+    TRUE,
+    FALSE,
     # Add new tokens here
 
     EOF,

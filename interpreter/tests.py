@@ -1170,6 +1170,7 @@ def test_generator_retries_the_kind_a_rejected_setup_was_for(monkeypatch):
     generator.texts.add("var a = 1")
     setups = iter([["var a = 1"], ["var b = 1"]])  # The first is a duplicate.
     monkeypatch.setattr(generator, 'setup_statement', lambda kind: next(setups))
+    monkeypatch.setattr(generator, 'with_comment', lambda line: line)  # A comment would make the duplicate new.
     monkeypatch.setattr(dg.ProgramGenerator, 'KINDS', {'while': 1})
 
     assert generator.add_statement()
